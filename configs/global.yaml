@@ -1,0 +1,26 @@
+experiment:
+  name: EvoMindDemo
+  mlflow_tracking_uri: file:./experiments/mlruns
+
+population_size: 20
+
+trainer:
+  epochs: 3
+  batch_size: 32
+  learning_rate: 0.001
+
+evolution:
+  elite_fraction: 0.3
+  mutation_rate: 0.4
+  crossover_rate: 0.6
+
+scheduler:
+  generations: 5
+  run_name: retail-forecasting-demo
+  log_history: true
+
+fitness:
+  accuracy_weight: 1.0
+  loss_weight: 0.4
+  latency_weight: 0.1
+  robustness_weight: 0.3

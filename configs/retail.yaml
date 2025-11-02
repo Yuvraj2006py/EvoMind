@@ -1,0 +1,19 @@
+trainer:
+  epochs: 4
+  batch_size: 16
+
+engine:
+  generations: 12
+  population: 40
+  epochs: 5
+  batch_size: 32
+  learning_rate: 0.001
+  parallel: true
+  ensemble_top_k: 3
+  bayes_rounds: 2
+
+evolution:
+  mutation_rate: 0.35
+
+scheduler:
+  generations: 5

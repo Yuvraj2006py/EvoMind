@@ -1,0 +1,7 @@
+# Placeholder configuration for future classification tasks.
+trainer:
+  epochs: 5
+  batch_size: 32
+
+evolution:
+  mutation_rate: 0.4
