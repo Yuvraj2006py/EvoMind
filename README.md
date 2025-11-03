@@ -1,4 +1,4 @@
-# EvoMind 2.0
+# EvoMind
 
 EvoMind is a modular AutoML platform that fuses evolutionary search with adaptive pipelines, explainability, and reporting. The project now ships as an importable SDK, CLI, and cloud-ready API so teams can automate experimentation end to end.
 
@@ -54,7 +54,7 @@ docker compose up --build
 ```
 
 ## Benchmark Snapshot
-| Dataset                         | Task           | EvoMind R² | Baseline (AutoGluon) |
+| Dataset                         | Task           | EvoMind RÂ² | Baseline (AutoGluon) |
 |---------------------------------|----------------|------------|-----------------------|
 | data/grocery_chain_data.json    | Forecasting    | 0.86       | 0.82                  |
 | data/retail_transactions.csv    | Classification | 0.91       | 0.88                  |
