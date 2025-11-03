@@ -129,7 +129,10 @@ def generate_profile_report(df: pd.DataFrame, output_path: Path) -> Path:
         profile = ProfileReport(df, title="EvoMind Dataset Profile", minimal=True)
         profile.to_file(output_path)
     except Exception:  # pragma: no cover - optional dependency fallback path.
-        html = df.describe(include="all", datetime_is_numeric=True).to_html()
+        try:
+            html = df.describe(include="all", datetime_is_numeric=True).to_html()
+        except TypeError:
+            html = df.describe(include="all").to_html()
         output_path.write_text(
             "<html><head><title>EvoMind Dataset Profile</title></head><body>"
             "<h1>Dataset Summary</h1>"
