@@ -241,10 +241,15 @@ def render_insights(manifest: Dict) -> None:
     shap_summary_path = explanations.get("shap_summary")
     if shap_summary_path:
         shap_summary_file = Path(shap_summary_path)
-        if shap_summary_file.exists() and shap_summary_file.suffix.lower() in {".png", ".jpg"}:
-            st.image(str(shap_summary_file), caption="SHAP Summary Plot")
-        elif shap_summary_file.exists():
-            st.warning(shap_summary_file.read_text(encoding="utf-8"))
+        if shap_summary_file.exists():
+            image_suffixes = {".png", ".jpg", ".jpeg"}
+            if shap_summary_file.suffix.lower() in image_suffixes:
+                try:
+                    st.image(str(shap_summary_file), caption="SHAP Summary Plot")
+                except Exception:
+                    st.warning(shap_summary_file.read_text(encoding="utf-8"))
+            else:
+                st.warning(shap_summary_file.read_text(encoding="utf-8"))
 
     permutation_path = explanations.get("permutation_importance")
     if permutation_path:

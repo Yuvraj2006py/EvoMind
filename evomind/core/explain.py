@@ -124,10 +124,14 @@ def generate_explanations(
         pd.DataFrame({"feature": list(importance.keys()), "importance": list(importance.values())}).to_csv(
             feature_csv, index=False
         )
-        shap_path.write_text(
+        message_path = shap_path.with_suffix(".txt")
+        message_path.write_text(
             "SHAP summary plot could not be generated because the optional dependency is missing.",
             encoding="utf-8",
         )
+        explanation_paths["shap_summary"] = message_path
+        if shap_path.exists():
+            shap_path.unlink()
 
     # Attempt a lightweight LIME explanation for the first few samples.
     try:  # pragma: no cover - lime integration optional.
