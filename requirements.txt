@@ -22,3 +22,5 @@ fastapi>=0.105
 uvicorn>=0.24
 pyyaml>=6.0
 networkx>=3.1
+coverage>=7.4
+pdoc>=14.0

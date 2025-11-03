@@ -25,13 +25,14 @@ except ImportError:  # pragma: no cover - fallback path is best effort only.
 class ExperimentLogger:
     """Thin convenience wrapper around Loguru and MLflow."""
 
-    def __init__(self, experiment_name: str, tracking_uri: Optional[str] = None) -> None:
+    def __init__(self, experiment_name: str, tracking_uri: Optional[str] = None, enabled: bool = True) -> None:
         self.experiment_name = experiment_name
         self.tracking_uri = tracking_uri
+        self.enabled = enabled
 
     def _ensure_mlflow(self) -> None:
         """Configure the MLflow tracking URI and experiment if MLflow is available."""
-        if mlflow is None:
+        if mlflow is None or not self.enabled:
             return
         if self.tracking_uri:
             mlflow.set_tracking_uri(self.tracking_uri)
@@ -47,7 +48,7 @@ class ExperimentLogger:
         """
 
         logger.info("Starting EvoMind run: {}", run_name)
-        if mlflow:
+        if mlflow and self.enabled:
             self._ensure_mlflow()
             with mlflow.start_run(run_name=run_name):
                 if params:
@@ -60,12 +61,12 @@ class ExperimentLogger:
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
         """Emit metrics to both the console and MLflow if available."""
         logger.debug("Metrics@{}: {}", step if step is not None else "-", metrics)
-        if mlflow:
+        if mlflow and self.enabled:
             mlflow.log_metrics(metrics, step=step)
 
     def log_artifact(self, path: Path) -> None:
         """Record an artifact with MLflow when available."""
-        if mlflow and path.exists():
+        if mlflow and self.enabled and path.exists():
             mlflow.log_artifact(str(path))
 
     def log_message(self, message: str) -> None:

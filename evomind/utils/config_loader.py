@@ -15,6 +15,8 @@ from typing import Any, Dict, Mapping, MutableMapping, Optional, Union
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from evomind.utils.config_reference import CONFIG_SCHEMA
+
 
 ConfigLike = Union[str, Path, Mapping[str, Any], DictConfig]
 
@@ -91,4 +93,28 @@ class ConfigLoader:
         if overrides:
             merged = OmegaConf.merge(merged, dict(overrides))
 
+        merged_dict = OmegaConf.to_container(merged, resolve=True)
+        self._validate(merged_dict)
+
         return LoadedConfig(merged)
+
+    def _validate(self, config_dict: Mapping[str, Any]) -> None:
+        """Ensure supplied configuration keys match the supported schema."""
+
+        legacy_aliases = CONFIG_SCHEMA.get("legacy", {})
+        for section, entries in config_dict.items():
+            if section not in CONFIG_SCHEMA:
+                if section in legacy_aliases:
+                    continue
+                raise ValueError(
+                    f"Unknown configuration section '{section}'. "
+                    f"Valid sections: {sorted(CONFIG_SCHEMA.keys())}"
+                )
+            expected_keys = CONFIG_SCHEMA[section]
+            if isinstance(entries, Mapping):
+                for key in entries.keys():
+                    if key not in expected_keys:
+                        raise ValueError(
+                            f"Unknown configuration key '{section}.{key}'. "
+                            f"Valid keys: {sorted(expected_keys.keys())}"
+                        )

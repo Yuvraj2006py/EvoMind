@@ -1,0 +1,173 @@
+﻿experiment:
+  name:
+    type: str
+    default: EvoMind
+    description: Display name used in logs, reports, and dashboards.
+  mlflow_uri:
+    type: Optional[str]
+    default: null
+    description: MLflow tracking URI (e.g. file:./mlruns) used for experiment logging.
+  mlflow_tracking_uri:
+    type: Optional[str]
+    default: null
+    description: Legacy alias for mlflow_uri.
+
+engine:
+  generations:
+    type: int
+    default: 5
+    description: Number of evolutionary generations to execute.
+  population:
+    type: int
+    default: 20
+    description: Number of genomes retained per generation.
+  epochs:
+    type: int
+    default: 5
+    description: Training epochs per genome during evolution.
+  batch_size:
+    type: int
+    default: 32
+    description: Mini-batch size for the Torch trainer.
+  learning_rate:
+    type: float
+    default: 0.001
+    description: Optimiser learning rate used during genome training.
+  parallel:
+    type: bool
+    default: true
+    description: Enable Ray-based distributed evaluation when available.
+  elite_fraction:
+    type: float
+    default: 0.2
+    description: Fraction of top-performing genomes copied into the next generation.
+  mutation_rate:
+    type: float
+    default: 0.3
+    description: Probability of applying mutations to offspring genomes.
+  crossover_rate:
+    type: float
+    default: 0.6
+    description: Probability that offspring are produced via crossover.
+  bayes_rounds:
+    type: int
+    default: 0
+    description: Optuna tuning trials executed on elite genomes each generation.
+  ensemble_top_k:
+    type: int
+    default: 3
+    description: Number of top genomes combined into the final ensemble prediction.
+  max_workers:
+    type: Optional[int]
+    default: null
+    description: Max worker threads used when Ray is unavailable (None = auto).
+
+trainer:
+  epochs:
+    type: int
+    default: 5
+    description: Baseline epochs used when engine.epochs is not provided.
+  batch_size:
+    type: int
+    default: 32
+    description: Baseline batch size used when engine.batch_size is not provided.
+  learning_rate:
+    type: float
+    default: 0.001
+    description: Baseline learning rate used when engine.learning_rate is not provided.
+
+data:
+  sensitive_feature:
+    type: Optional[str]
+    default: null
+    description: Feature used to compute fairness diagnostics (e.g. demographic parity).
+
+reporting:
+  export_formats:
+    type: List[str]
+    default: ["html", "pdf"]
+    description: Report formats generated after a run.
+
+insights:
+  shap_sample_size:
+    type: int
+    default: 200
+    description: Number of rows sampled when generating SHAP explanations.
+
+logging:
+  enable_mlflow:
+    type: bool
+    default: true
+    description: Toggle MLflow logging for runs.
+  mlflow_uri:
+    type: Optional[str]
+    default: null
+    description: Optional override for the MLflow tracking URI.
+
+fitness:
+  accuracy_weight:
+    type: float
+    default: 1.0
+    description: Weight applied to accuracy-style metrics when computing fitness.
+  loss_weight:
+    type: float
+    default: 0.4
+    description: Weight applied to validation loss when computing fitness.
+  latency_weight:
+    type: float
+    default: 0.1
+    description: Weight applied to latency penalty when computing fitness.
+  robustness_weight:
+    type: float
+    default: 0.3
+    description: Weight applied to robustness metrics when computing fitness.
+
+scheduler:
+  generations:
+    type: int
+    default: 5
+    description: Legacy scheduler configuration mapping to engine.generations.
+  run_name:
+    type: str
+    default: retail-forecasting-demo
+    description: Optional run name used in legacy configs.
+  log_history:
+    type: bool
+    default: true
+    description: Whether to log per-generation history (legacy compatibility).
+
+evolution:
+  elite_fraction:
+    type: float
+    default: 0.2
+    description: Legacy alias for engine.elite_fraction.
+  mutation_rate:
+    type: float
+    default: 0.3
+    description: Legacy alias for engine.mutation_rate.
+  crossover_rate:
+    type: float
+    default: 0.6
+    description: Legacy alias for engine.crossover_rate.
+
+legacy:
+  population_size:
+    type: int
+    default: 20
+    description: Backwards-compatible alias for engine.population.
+  scheduler_generations:
+    type: int
+    default: 5
+    description: Backwards-compatible alias for engine.generations.
+  evolution_elite_fraction:
+    type: float
+    default: 0.2
+    description: Backwards-compatible alias for engine.elite_fraction.
+  evolution_mutation_rate:
+    type: float
+    default: 0.3
+    description: Backwards-compatible alias for engine.mutation_rate.
+  evolution_crossover_rate:
+    type: float
+    default: 0.6
+    description: Backwards-compatible alias for engine.crossover_rate.

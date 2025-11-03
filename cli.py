@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 
 from evomind import EvoMind
+from evomind.diagnostics.doctor import run_doctor
+from evomind.utils.profiles import list_profiles
 
 
 def _default_config_path(path: str) -> Path:
@@ -34,6 +36,7 @@ def _run_command(args: argparse.Namespace) -> None:
     em = EvoMind(
         data=args.data,
         task=args.task or "auto",
+        profile=args.profile,
         insights=not args.no_insights,
         config=config_source,
     )
@@ -66,9 +69,22 @@ def _load_model(args: argparse.Namespace) -> None:
         print(metadata.read_text())
 
 
+def _doctor_command(_: argparse.Namespace) -> None:
+    results = run_doctor()
+    for item in results:
+        status = item.get("status", "unknown").upper()
+        check = item.get("check", "")
+        details = item.get("details")
+        print(f"[{status}] {check}")
+        if details:
+            print(f"  {details}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evomind", description="EvoMind AutoML SDK CLI")
     subparsers = parser.add_subparsers(dest="command")
+
+    profile_choices = sorted(list_profiles().keys())
 
     run_parser = subparsers.add_parser("run", help="Execute an EvoMind AutoML run.")
     run_parser.add_argument("--data", required=True, help="Path to dataset file.")
@@ -76,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", help="Optional configuration file (YAML/JSON).")
     run_parser.add_argument("--no-insights", action="store_true", help="Disable insight generation.")
     run_parser.add_argument("--export", choices=["html", "pdf"], help="Export report in the selected format.")
+    run_parser.add_argument("--profile", choices=profile_choices, help="Apply a configuration profile before overrides.")
     run_parser.set_defaults(func=_run_command)
 
     list_parser = subparsers.add_parser("list-models", help="List models registered in the local registry.")
@@ -84,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
     load_parser = subparsers.add_parser("load", help="Display information about a registered model.")
     load_parser.add_argument("model_id", help="Model identifier (directory name).")
     load_parser.set_defaults(func=_load_model)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run environment diagnostics.")
+    doctor_parser.set_defaults(func=_doctor_command)
 
     return parser
 
@@ -105,3 +125,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

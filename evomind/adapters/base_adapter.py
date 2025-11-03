@@ -21,6 +21,13 @@ class BaseTaskAdapter(ABC):
     """Abstract base class describing the adapter contract."""
 
     def __init__(self, schema: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Parameters
+        ----------
+        schema : dict, optional
+            Optional schema metadata inferred from the dataset profiler. Adapters
+            can use this information to tailor preprocessing (e.g., type casting).
+        """
         self.schema: Dict[str, Any] = schema or {}
 
     @abstractmethod

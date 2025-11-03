@@ -122,6 +122,23 @@ class EvolutionEngine:
         logger: ExperimentLogger,
         config: Optional[EvolutionConfig] = None,
     ) -> None:
+        """Create a new evolutionary engine.
+
+        Parameters
+        ----------
+        population : PopulationManager
+            Initial population of genomes that will be evolved.
+        trainer : Trainer
+            Component responsible for fitting candidate models.
+        fitness_evaluator : FitnessEvaluator
+            Aggregates objective metrics into a scalar fitness score.
+        search_space : SearchSpace
+            Search space used to sample layers and genomes.
+        logger : ExperimentLogger
+            Logging utility for metrics and MLflow integration.
+        config : EvolutionConfig, optional
+            Hyper-parameters guiding selection, mutation, and parallelism.
+        """
         self.population = population
         self.trainer = trainer
         self.fitness_evaluator = fitness_evaluator
@@ -164,7 +181,22 @@ class EvolutionEngine:
         dataset: Tuple,
         generation_idx: int,
     ) -> List[Genome]:
-        """Evaluate and rank genomes using the configured parallel backend."""
+        """Evaluate and rank genomes using the configured parallel backend.
+
+        Parameters
+        ----------
+        adapter : BaseTaskAdapter
+            Adapter supplying task-specific model construction and scoring.
+        dataset : tuple
+            Tuple containing training and validation tensors produced by the adapter.
+        generation_idx : int
+            Index of the generation currently being processed.
+
+        Returns
+        -------
+        list[Genome]
+            Genomes annotated with fitness, metrics, and generation metadata.
+        """
 
         payloads = self._build_payloads(adapter, dataset)
         # Fault tolerance: re-run sequentially if the backend raises.

@@ -8,6 +8,7 @@ CLI, SDK, and API interfaces.
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import json
+from omegaconf import OmegaConf
+import os
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -50,6 +54,16 @@ from evomind.evolution import (
 )
 from evomind.reporting.report_builder import build_report
 from evomind.utils import ConfigLoader, ExperimentLogger
+from evomind.utils.config_reference import (
+    as_dict as _config_schema_dict,
+    to_markdown as _config_schema_markdown,
+)
+from evomind.utils.fingerprint import (
+    compute_fingerprint,
+    get_cached_schema,
+    update_cache,
+)
+from evomind.utils.profiles import get_profile, list_profiles
 
 
 def _assess_stability(metrics: Dict[str, float]) -> str:
@@ -167,30 +181,138 @@ class EvoMindResult:
     artifacts: Dict[str, Any]
     output_dir: Path
     engine: EvolutionEngine
+    profile: Optional[str] = None
 
     def export_report(self, fmt: str = "html") -> Optional[Path]:
+        """Return the path to a rendered report in the requested format.
+
+        Parameters
+        ----------
+        fmt : str, default "html"
+            Desired report format. Typical options are ``"html"`` and ``"pdf"``.
+
+        Returns
+        -------
+        Path or None
+            Location of the generated report. Raises :class:`ValueError` when the
+            format is unavailable.
+        """
+
         reports = self.artifacts.get("reports", {})
         if fmt in reports:
             return reports[fmt]
         raise ValueError(f"Report format '{fmt}' not available. Options: {list(reports.keys())}")
 
     def dashboard(self) -> Path:
+        """Return the path to the Streamlit dashboard entry point."""
+
         return Path("evomind/dashboard/app.py")
+
+    def launch_dashboard(self, port: int = 8501, host: str = "127.0.0.1") -> subprocess.Popen:
+        """Launch the Streamlit dashboard for interactive exploration.
+
+        Parameters
+        ----------
+        port : int, default 8501
+            Port where Streamlit should serve the dashboard.
+        host : str, default "127.0.0.1"
+            Bind address for the Streamlit server.
+
+        Returns
+        -------
+        subprocess.Popen
+            Handle to the spawned Streamlit process. Terminate it to stop the dashboard.
+        """
+
+        env = os.environ.copy()
+        env.setdefault("EVOMIND_DEFAULT_RUN", self.run_id)
+        command = [
+            "streamlit",
+            "run",
+            str(self.dashboard()),
+            "--server.port",
+            str(port),
+            "--server.address",
+            host,
+        ]
+        return subprocess.Popen(command, env=env)
 
 
 class EvoMind:
-    """Primary interface coordinating dataset understanding and evolution."""
+    """Primary interface coordinating dataset understanding and evolution.
+
+    The class exposes a high-level SDK surface that can be consumed from
+    notebooks, scripts, or production services. Use :meth:`describe_config`
+    for interactive documentation of all tunable parameters.
+    """
+
+    @classmethod
+    def describe_config(
+        cls,
+        section: Optional[str] = None,
+        *,
+        as_markdown: bool = False,
+    ) -> Union[str, Dict[str, Dict[str, Dict[str, object]]]]:
+        """Return metadata describing EvoMind configuration keys.
+
+        Parameters
+        ----------
+        section : str, optional
+            When provided, only return information for a single section
+            (for example ``"engine"``). If omitted, all sections are returned.
+        as_markdown : bool, default False
+            When True, the result is formatted as Markdown text suitable for
+            documentation. Otherwise a nested dictionary is returned.
+
+        Returns
+        -------
+        dict or str
+            Nested configuration metadata or a markdown string when
+            ``as_markdown`` is set.
+        """
+
+        if as_markdown:
+            return _config_schema_markdown(section=section)
+        return _config_schema_dict(section)
+
+    @classmethod
+    def available_profiles(cls) -> Dict[str, Dict[str, object]]:
+        """Return a mapping of available configuration profiles."""
+
+        return list_profiles()
 
     def __init__(
         self,
         data: Union[str, Path, pd.DataFrame],
         task: str = "auto",
+        profile: Optional[str] = None,
         insights: bool = True,
         config: Optional[Union[str, Path, Dict[str, Any]]] = None,
         global_config: Optional[Union[str, Path, Dict[str, Any]]] = "configs/global.yaml",
     ) -> None:
+        """Create a new EvoMind orchestrator.
+
+        Parameters
+        ----------
+        data : str | Path | pandas.DataFrame
+            Dataset source. Accepts a path to CSV/JSON files or an in-memory dataframe.
+        task : str, default "auto"
+            Registered task adapter to use. When ``"auto"`` EvoMind detects the best
+            adapter based on schema profiling.
+        profile : str, optional
+            Optional configuration profile (e.g. ``"fast"``, ``"balanced"``,
+            ``"exhaustive"``) to merge before applying overrides.
+        insights : bool, default True
+            Enable explainability and profiling artefacts.
+        config : str | Path | dict, optional
+            Task-specific configuration overrides supplied as a YAML/JSON file or a mapping.
+        global_config : str | Path | dict, optional
+            Base configuration merged before ``config``. Defaults to ``configs/global.yaml``.
+        """
+
         self.data_source = data
         self.task = task
+        self.profile = profile
         self.insights_enabled = insights
         if isinstance(global_config, (str, Path)):
             gc_path = Path(global_config)
@@ -200,17 +322,42 @@ class EvoMind:
         else:
             global_loader = ConfigLoader()
 
+        profile_overrides: Dict[str, Any] = {}
+        if profile:
+            try:
+                profile_overrides = get_profile(profile)
+            except KeyError as exc:  # pragma: no cover - defensive
+                raise ValueError(str(exc)) from exc
+
         overrides = None
         if isinstance(config, Dict):
-            overrides = config
+            merged_overrides = OmegaConf.merge(
+                OmegaConf.create(profile_overrides),
+                OmegaConf.create(dict(config)),
+            )
+            overrides = OmegaConf.to_container(merged_overrides, resolve=True)  # type: ignore[assignment]
             config = None
+        elif profile_overrides:
+            overrides = profile_overrides
+
         self.config_loader = global_loader
         loaded = self.config_loader.load(config=config, overrides=overrides)
         self.config = loaded.to_dict()
 
-        experiment_name = self.config.get("experiment", {}).get("name", "EvoMind")
-        tracking_uri = self.config.get("experiment", {}).get("mlflow_uri")
-        self.logger = ExperimentLogger(experiment_name=experiment_name, tracking_uri=tracking_uri)
+        experiment_cfg = self.config.get("experiment", {})
+        logging_cfg = self.config.get("logging", {})
+        experiment_name = experiment_cfg.get("name", "EvoMind")
+        logging_enabled = bool(logging_cfg.get("enable_mlflow", True))
+        tracking_uri = (
+            logging_cfg.get("mlflow_uri")
+            or experiment_cfg.get("mlflow_uri")
+            or experiment_cfg.get("mlflow_tracking_uri")
+        )
+        self.logger = ExperimentLogger(
+            experiment_name=experiment_name,
+            tracking_uri=tracking_uri,
+            enabled=logging_enabled,
+        )
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path("experiments") / f"run_{self.run_id}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -267,6 +414,79 @@ class EvoMind:
             lines.append(f"Fairness - equal opportunity gap: {fairness.get('equal_opportunity', 0.0):.3f}")
         log_path.write_text("\n".join(lines), encoding="utf-8")
         return log_path
+
+    def _write_model_card(self, metrics: Dict[str, float], artifacts: Dict[str, Any]) -> Path:
+        """Persist a lightweight model card summarising key artefacts."""
+
+        card_path = self.output_dir / "model_card.html"
+        reports = artifacts.get("reports", {})
+        report_link = reports.get("html") if isinstance(reports, dict) else None
+        fairness = artifacts.get("fairness", {}) or {}
+        insight_summary = artifacts.get("insight_summary", "")
+
+        metric_rows = "".join(
+            f"<tr><td>{name}</td><td>{value:.4f}</td></tr>"
+            for name, value in sorted(metrics.items())
+            if isinstance(value, (int, float))
+        )
+        fairness_rows = "".join(
+            f"<tr><td>{name}</td><td>{value:.4f}</td></tr>"
+            for name, value in sorted(fairness.items())
+            if isinstance(value, (int, float))
+        ) or "<tr><td colspan='2'>Not available</td></tr>"
+
+        card_html = f"""
+        <html>
+        <head>
+            <meta charset='utf-8'>
+            <title>EvoMind Model Card</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 2rem; background: #111; color: #f0f0f0; }}
+                h1, h2 {{ color: #4dd0e1; }}
+                table {{ width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; }}
+                td, th {{ border: 1px solid #333; padding: 0.5rem; text-align: left; }}
+                a {{ color: #80cbc4; }}
+                .section {{ margin-bottom: 2rem; }}
+            </style>
+        </head>
+        <body>
+            <h1>EvoMind Model Card</h1>
+            <p><strong>Run ID:</strong> {self.run_id}</p>
+            <div class='section'>
+                <h2>Summary</h2>
+                <p>{insight_summary or 'No insight summary recorded.'}</p>
+            </div>
+            <div class='section'>
+                <h2>Performance Metrics</h2>
+                <table>
+                    <tbody>
+                        {metric_rows or '<tr><td colspan="2">No metrics logged.</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+            <div class='section'>
+                <h2>Fairness Diagnostics</h2>
+                <table>
+                    <tbody>
+                        {fairness_rows}
+                    </tbody>
+                </table>
+            </div>
+            <div class='section'>
+                <h2>Related Artefacts</h2>
+                <ul>
+                    <li>Lineage Manifest: {self.output_dir / 'manifest.json'}</li>
+                    <li>Metrics: {self.output_dir / 'metrics.json'}</li>
+                    <li>Report (HTML): {report_link or 'Not generated'}</li>
+                </ul>
+            </div>
+        </body>
+        </html>
+        """
+
+        card_path.write_text(card_html, encoding="utf-8")
+        return card_path
+
     def _persist_run_outputs(
         self,
         history_records: List[Dict[str, Any]],
@@ -332,6 +552,8 @@ class EvoMind:
             "diagnosis_log": str(artifacts.get("diagnosis_log")) if artifacts.get("diagnosis_log") else None,
             "recorded_at": self.run_id,
         }
+        manifest["profile"] = self.profile
+        manifest["fingerprint"] = artifacts.get("fingerprint")
 
         manifest_path = self.output_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -351,6 +573,13 @@ class EvoMind:
             latest_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         else:
             manifest["mutual_info"] = None
+
+        card_path = self._write_model_card(metrics, artifacts)
+        paths["model_card"] = card_path
+        artifacts["model_card"] = str(card_path)
+        manifest["model_card"] = str(card_path)
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        latest_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
         return paths
     def _register_model(self, genome: Genome, metrics: Dict[str, float]) -> Path:
@@ -374,6 +603,7 @@ class EvoMind:
         lineage: List[Dict[str, Any]],
         processed_dataset: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
         sensitive_feature: Optional[str],
+        fingerprint: Optional[str],
     ) -> Dict[str, Any]:
         artifacts: Dict[str, Any] = {}
         profile_path = generate_profile_report(df, self.output_dir / "artifacts" / "data_profile.html")
@@ -479,16 +709,32 @@ class EvoMind:
                 "insight_summary": insight_summary,
                 "diagnosis_log": str(diagnosis_path),
                 "report_context": report_context,
+                "profile": self.profile,
+                "fingerprint": fingerprint,
             }
         )
         return artifacts
 
     def run(self) -> EvoMindResult:
-        """Execute the full AutoML pipeline and return structured results."""
+        """Execute the full AutoML workflow and return artefacts.
+
+        Returns
+        -------
+        EvoMindResult
+            Rich result object containing metrics, lineage, persisted artefacts,
+            and helper utilities for exporting reports or launching the dashboard.
+        """
 
         df, data_path = self._load_dataframe()
-        schema = profile_dataset(df)
+        fingerprint = compute_fingerprint(df if data_path is None else None, data_path)
+        cached_schema = get_cached_schema(fingerprint) if fingerprint else None
+        if cached_schema:
+            schema = copy.deepcopy(cached_schema)
+        else:
+            schema = profile_dataset(df)
         schema["task_type"] = schema.get("task_type") or detect_task_type(df, schema)
+        if fingerprint:
+            update_cache(fingerprint, copy.deepcopy(schema), schema.get("task_type"))
 
         adapter = self._build_adapter(self._detect_task(df, schema), schema)
         dataset, dataset_summary, metadata = _prepare_dataset(adapter, data_path, df, schema)
@@ -567,6 +813,7 @@ class EvoMind:
             lineage=lineage,
             processed_dataset=dataset,
             sensitive_feature=self.config.get("data", {}).get("sensitive_feature"),
+            fingerprint=fingerprint,
         )
 
         artifact_paths = self._persist_run_outputs(history_records, artifacts, metrics)
@@ -582,5 +829,6 @@ class EvoMind:
             artifacts=artifacts,
             output_dir=self.output_dir,
             engine=engine,
+            profile=self.profile,
         )
 

@@ -1,10 +1,10 @@
-# EvoMind
+# EvoMind 2.0
 
 EvoMind is a modular AutoML platform that fuses evolutionary search with adaptive pipelines, explainability, and reporting. The project now ships as an importable SDK, CLI, and cloud-ready API so teams can automate experimentation end to end.
 
 ## Architecture
 ```
-Dataset ? Profiler ? TaskDetector ? Adapter ? EvolutionEngine ? Insights & Reports ? Dashboard / API
+Dataset -> Profiler -> TaskDetector -> Adapter -> EvolutionEngine -> Insights & Reports -> Dashboard / API
 ```
 Key layers include:
 - **Profiler**: schema detection, data health scoring, integrity warnings, and time-series diagnostics.
@@ -32,9 +32,11 @@ result.export_report("html")
 
 ### CLI
 ```bash
-python cli.py --data data/holiday_sales.csv --task auto --export html
+python cli.py run --data data/grocery_chain_data.json --task auto --export html
+python cli.py run --data data/grocery_chain_data.json --profile fast
 python cli.py list-models
 python cli.py load run_20251101_153000
+python cli.py doctor
 ```
 
 ### FastAPI Service
@@ -52,15 +54,31 @@ streamlit run evomind/dashboard/app.py
 ```bash
 docker compose up --build
 ```
+See `docs/deployment.md` for production deployment notes, environment variables, and scaling guidance.
 
 ## Benchmark Snapshot
-| Dataset                         | Task           | EvoMind R² | Baseline (AutoGluon) |
+| Dataset                         | Task           | EvoMind R^2 | Baseline (AutoGluon) |
 |---------------------------------|----------------|------------|-----------------------|
 | data/grocery_chain_data.json    | Forecasting    | 0.86       | 0.82                  |
 | data/retail_transactions.csv    | Classification | 0.91       | 0.88                  |
 
 ## Model Registry
 Artifacts from every run are saved under `models/<run_id>/` including `model.pt`, `metrics.json`, and the resolved configuration snapshot. Use `python cli.py list-models` to inspect available models.
+
+## SDK API Reference
+EvoMind ships with inline introspection so you can explore configuration options without leaving Python:
+
+```python
+from evomind import EvoMind
+
+# Inspect every available configuration section
+EvoMind.describe_config()
+
+# Focus on a single section and render Markdown
+print(EvoMind.describe_config(section="engine", as_markdown=True))
+```
+
+Run `help(EvoMind)` or `help(EvoMindResult)` for docstrings covering runtime methods like `run`, `export_report`, and `launch_dashboard`.
 
 ## Tests
 ```bash

@@ -4,7 +4,7 @@ Streamlit rendering utilities for the Data Profile tab.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Callable, Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +18,7 @@ def render_data_profile_tab(
     mutual_info_df: pd.DataFrame,
     anomalies: Dict,
     time_series_info: Dict,
+    correlation_network: Optional[Callable[[float], None]] = None,
 ) -> None:
     if not profile:
         st.info("Dataset profile not available. Run EvoMind with insights enabled.")
@@ -61,6 +62,18 @@ def render_data_profile_tab(
     else:
         st.info("Mutual information scores unavailable.")
 
+    if correlation_network:
+        st.markdown("### Correlation Network")
+        threshold = st.slider(
+            "Correlation Threshold",
+            min_value=0.1,
+            max_value=0.9,
+            value=0.4,
+            step=0.05,
+            help="Edges are shown when the absolute correlation exceeds this value.",
+        )
+        correlation_network(threshold)
+
     if time_series_info:
         st.markdown("### Time-series Diagnostics")
         rolling_mean = time_series_info.get("rolling_mean")
@@ -71,4 +84,3 @@ def render_data_profile_tab(
             st.line_chart(pd.Series(rolling_var, name="Rolling Variance"))
         if not rolling_mean and not rolling_var:
             st.info("Insufficient data for time-series decomposition.")
-

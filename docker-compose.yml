@@ -1,20 +1,40 @@
 version: "3.9"
+
 services:
-  dashboard:
-    build: .
-    command: streamlit run evomind/dashboard/app.py --server.address 0.0.0.0 --server.port 8501
+  evomind-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    command: >
+      bash -c "ray start --head --port=10001 --dashboard-host=0.0.0.0 --dashboard-port=8265 &&
+               uvicorn evomind.api.server:app --host 0.0.0.0 --port ${EVOMIND_API_PORT:-8000}"
+    environment:
+      - EVOMIND_API_PORT=8000
     ports:
-      - "8501:8501"
+      - "${EVOMIND_API_PORT:-8000}:8000"
+      - "8265:8265"
     volumes:
       - .:/app
-  ray-head:
-    image: rayproject/ray:latest
-    command: ["ray", "start", "--head", "--dashboard-host", "0.0.0.0"]
+
+  evomind-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    command: streamlit run evomind/dashboard/app.py --server.address 0.0.0.0 --server.port ${EVOMIND_DASHBOARD_PORT:-8501}
+    environment:
+      - EVOMIND_API_URL=http://evomind-api:8000
+      - EVOMIND_DASHBOARD_PORT=8501
     ports:
-      - "8265:8265"
-      - "6379:6379"
+      - "${EVOMIND_DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - .:/app
+    depends_on:
+      - evomind-api
+
   ray-worker:
     image: rayproject/ray:latest
-    command: ["ray", "start", "--address=ray-head:6379"]
+    command: ["ray", "start", "--address=ray://evomind-api:10001"]
+    environment:
+      - RAY_HEAD_ADDR=ray://evomind-api:10001
     depends_on:
-      - ray-head
+      - evomind-api

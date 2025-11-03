@@ -31,10 +31,11 @@ class ClassificationAdapter(TabularAdapter):
     def evaluate_model(self, model: nn.Module, X_val: Any, y_val: Any) -> Dict[str, float]:
         logits = model(X_val)
         probabilities = torch.softmax(logits, dim=1) if logits.shape[1] > 1 else torch.sigmoid(logits)
+        probabilities_detached = probabilities.detach()
         predictions = (
-            torch.argmax(probabilities, dim=1)
-            if probabilities.ndim > 1
-            else (probabilities > 0.5).long().view(-1)
+            torch.argmax(probabilities_detached, dim=1)
+            if probabilities_detached.ndim > 1
+            else (probabilities_detached > 0.5).long().view(-1)
         )
         targets = torch.argmax(y_val, dim=1) if y_val.ndim > 1 else y_val.view(-1).long()
 
@@ -47,10 +48,10 @@ class ClassificationAdapter(TabularAdapter):
         )
 
         roc_auc = None
-        if probabilities.ndim > 1 and probabilities.shape[1] == 2:
-            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities[:, 1].cpu().numpy())
-        elif probabilities.ndim == 1:
-            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities.cpu().numpy())
+        if probabilities_detached.ndim > 1 and probabilities_detached.shape[1] == 2:
+            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities_detached[:, 1].cpu().numpy())
+        elif probabilities_detached.ndim == 1:
+            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities_detached.cpu().numpy())
 
         loss = F.binary_cross_entropy(probabilities, y_val.float()) if probabilities.ndim == 1 else F.cross_entropy(
             logits, targets
