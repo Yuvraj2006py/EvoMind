@@ -27,6 +27,20 @@ def generic_preprocess(df: pd.DataFrame, target: str | None = None) -> Tuple[pd.
         target = df.columns[-1]
 
     y = df[target]
+    if y.dtype == "object":
+        as_str = y.astype(str).str.strip()
+        cleaned = (
+            as_str.str.replace(r"[^\d\-\.\,]", "", regex=True)
+            .str.replace(",", "", regex=False)
+            .replace({"": pd.NA, ".": pd.NA, "-": pd.NA})
+        )
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+        if numeric.notna().sum() >= len(y) * 0.5:
+            y = numeric
+        else:
+            y = as_str.fillna("missing")
+    else:
+        y = y.copy()
     X = df.drop(columns=[target], errors="ignore")
 
     for column in X.columns:

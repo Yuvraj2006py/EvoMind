@@ -93,6 +93,14 @@ def _run_generic_fallback(
     task_type: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     X_scaled, y_series = generic_preprocess(df, target=schema.get("target"))
+    valid_mask = ~y_series.isna()
+    if not valid_mask.all():
+        X_scaled = X_scaled.loc[valid_mask]
+        y_series = y_series.loc[valid_mask]
+    if y_series.empty:
+        raise ValueError("Target column empty after removing missing values.")
+    if task_type == "classification" and y_series.nunique() <= 1:
+        raise ValueError("Target column needs at least two classes for classification.")
     stratify = y_series if task_type == "classification" and y_series.nunique() > 1 else None
     from sklearn.model_selection import train_test_split
 
