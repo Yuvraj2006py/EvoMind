@@ -10,6 +10,7 @@ backends are unavailable.
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
@@ -48,8 +49,11 @@ def _ensure_ray_init() -> bool:
         return False
     if ray.is_initialized():  # pragma: no cover - quick exit branch
         return True
-    ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
-    return True
+    try:  # pragma: no cover - defensive path
+        ray.init(ignore_reinit_error=True, include_dashboard=False, logging_level="ERROR")
+        return True
+    except Exception:
+        return False
 
 
 def _evaluate_payload(payload: Dict[str, object]) -> Dict[str, object]:
@@ -98,12 +102,21 @@ class ParallelExecutor:
             backend = "ray" if _ensure_ray_init() else "threads"
         self.backend = backend if backend in {"ray", "threads"} else "threads"
         self.max_workers = max_workers
+        self._logger = logging.getLogger(__name__)
 
     def map(self, payloads: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
         if self.backend == "ray" and ray is not None:
-            handles = [_ray_evaluate.remote(payload) for payload in payloads]  # type: ignore[attr-defined]
-            results = ray.get(handles)
-            return list(results)
+            try:
+                handles = [_ray_evaluate.remote(payload) for payload in payloads]  # type: ignore[attr-defined]
+                results = ray.get(handles)
+                return list(results)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                self._logger.warning(
+                    "Ray execution failed (%s). Falling back to threaded evaluation.",
+                    exc,
+                    exc_info=True,
+                )
+                self.backend = "threads"
         # Threaded fallback still provides parallel speedup without extra deps.
         workers = self.max_workers or min(8, max(1, len(payloads)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
