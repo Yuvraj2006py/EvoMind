@@ -32,9 +32,10 @@ class TabularAdapter(BaseTaskAdapter):
         schema: Optional[Dict[str, Any]] = None,
         default_target: str = "target",
     ) -> None:
+        self.default_target = default_target
         super().__init__(schema=schema)
         self.task_type = task_type
-        self.target_column = (schema or {}).get("target") or default_target
+        self.target_column = self._resolve_schema_target(self.schema) or self.default_target
         self.scaler = StandardScaler()
         self.encoder = create_one_hot_encoder()
         self.label_encoder: LabelEncoder | None = None
@@ -59,6 +60,14 @@ class TabularAdapter(BaseTaskAdapter):
                 X = X.loc[valid_mask]
                 y = y.loc[valid_mask]
             y = y.astype(np.float32)
+
+        X = X.copy()
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            X[numeric_cols] = X[numeric_cols].fillna(X[numeric_cols].mean())
+        categorical_cols = X.select_dtypes(exclude=[np.number]).columns
+        if len(categorical_cols) > 0:
+            X[categorical_cols] = X[categorical_cols].fillna("missing")
 
         if self.task_type == "classification":
             y = y.astype(str)
@@ -97,6 +106,25 @@ class TabularAdapter(BaseTaskAdapter):
         )
         numeric = pd.to_numeric(cleaned, errors="coerce")
         return numeric
+
+    def _resolve_schema_target(self, schema: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not schema:
+            return None
+        target = schema.get("target")
+        return target if isinstance(target, str) and target else None
+
+    @property
+    def schema(self) -> Dict[str, Any]:  # type: ignore[override]
+        return BaseTaskAdapter.schema.fget(self)  # type: ignore[attr-defined]
+
+    @schema.setter
+    def schema(self, value: Optional[Dict[str, Any]]) -> None:  # type: ignore[override]
+        BaseTaskAdapter.schema.fset(self, value)  # type: ignore[attr-defined]
+        target = self._resolve_schema_target(value)
+        if target:
+            self.target_column = target
+        elif not getattr(self, "target_column", None):
+            self.target_column = self.default_target
 
     def preprocess(self, X_train: Any, X_val: Any) -> Tuple[Any, Any]:
         X_train_df = pd.DataFrame(X_train)

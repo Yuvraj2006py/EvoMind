@@ -28,7 +28,16 @@ class BaseTaskAdapter(ABC):
             Optional schema metadata inferred from the dataset profiler. Adapters
             can use this information to tailor preprocessing (e.g., type casting).
         """
-        self.schema: Dict[str, Any] = schema or {}
+        self._schema: Dict[str, Any] = {}
+        self.schema = schema or {}
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return self._schema
+
+    @schema.setter
+    def schema(self, value: Optional[Dict[str, Any]]) -> None:
+        self._schema = dict(value or {})
 
     @abstractmethod
     def load_data(self, path: Path) -> Tuple[Any, Any, Any, Any]:
