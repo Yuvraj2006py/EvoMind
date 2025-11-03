@@ -50,6 +50,16 @@ class TabularAdapter(BaseTaskAdapter):
         y = df[target_column]
         X = df.drop(columns=[target_column], errors="ignore")
 
+        if self.task_type != "classification":
+            y = self._coerce_numeric_target(y)
+            valid_mask = ~y.isna()
+            if valid_mask.sum() < 2:
+                raise ValueError("Target column must contain at least two numeric values.")
+            if not valid_mask.all():
+                X = X.loc[valid_mask]
+                y = y.loc[valid_mask]
+            y = y.astype(np.float32)
+
         if self.task_type == "classification":
             y = y.astype(str)
 
@@ -74,6 +84,19 @@ class TabularAdapter(BaseTaskAdapter):
         fallback = df.columns[-1]
         self.target_column = fallback
         return fallback
+
+    @staticmethod
+    def _coerce_numeric_target(series: pd.Series) -> pd.Series:
+        if pd.api.types.is_numeric_dtype(series):
+            return series.astype(float)
+        as_str = series.astype(str).str.strip()
+        cleaned = (
+            as_str.str.replace(r"[^\d\-\.\,]", "", regex=True)
+            .str.replace(",", "", regex=False)
+            .replace({"": pd.NA, ".": pd.NA, "-": pd.NA})
+        )
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+        return numeric
 
     def preprocess(self, X_train: Any, X_val: Any) -> Tuple[Any, Any]:
         X_train_df = pd.DataFrame(X_train)

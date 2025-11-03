@@ -10,7 +10,7 @@ from evomind.evolution.search_space import LayerSpec
 
 
 def _write_csv(path: Path, df: pd.DataFrame) -> Path:
-    path.write_text(df.to_csv(index=False))
+    df.to_csv(path, index=False, encoding="utf-8")
     return path
 
 
@@ -44,3 +44,20 @@ def test_regression_adapter_end_to_end(tmp_path: Path) -> None:
     schema = {"target": "target", "numeric": ["feature_a", "feature_b"], "text": [], "datetime": []}
     detected = detect_task_type(df, schema)
     assert detected == "regression"
+
+
+def test_regression_adapter_coerces_numeric_target(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "feature_a": [1, 2, 3, 4, 5, 6],
+            "Price": ["₹1,000", "₹2,500", None, "3,750", "₹4,200", "In Progress"],
+        }
+    )
+    data_path = _write_csv(tmp_path / "prices.csv", df)
+
+    adapter = RegressionAdapter(schema={"target": "Price"})
+    X_train, y_train, X_val, y_val = adapter.load_data(data_path)
+
+    for series in (y_train, y_val):
+        assert series.dtype.kind in {"f", "i"}
+        assert series.notna().all()
