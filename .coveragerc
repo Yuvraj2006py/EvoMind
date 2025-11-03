@@ -1,0 +1,7 @@
+[run]
+source = evomind
+omit =
+    tests/*
+
+[report]
+show_missing = True
