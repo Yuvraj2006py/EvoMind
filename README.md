@@ -1,4 +1,4 @@
-# EvoMind 2.0
+# EvoMind
 
 EvoMind is a modular AutoML platform that fuses evolutionary search with adaptive pipelines, explainability, and reporting. The project now ships as an importable SDK, CLI, and cloud-ready API so teams can automate experimentation end to end.
 
