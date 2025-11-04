@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Dict
 
 import pandas as pd
+from pandas.api.types import CategoricalDtype, is_integer_dtype, is_numeric_dtype
 
 
 def detect_task_type(df: pd.DataFrame, schema: Dict[str, object]) -> str:
@@ -41,10 +42,10 @@ def detect_task_type(df: pd.DataFrame, schema: Dict[str, object]) -> str:
         target_series = df[target]
         if target_series.dtype in ["object", "category"]:
             return "classification"
-        if pd.api.types.is_integer_dtype(target_series) or pd.api.types.is_categorical_dtype(target_series):
+        if is_integer_dtype(target_series) or isinstance(target_series.dtype, CategoricalDtype):
             if target_series.nunique() < 15:
                 return "classification"
-        if pd.api.types.is_numeric_dtype(target_series):
+        if is_numeric_dtype(target_series):
             if target_series.nunique() <= 10:
                 return "classification"
             return "regression"

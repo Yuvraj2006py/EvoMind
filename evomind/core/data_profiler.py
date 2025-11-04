@@ -98,14 +98,35 @@ def compute_mutual_information(
         return []
 
     # Guard against invalid values.
+    X = X.dropna(axis=1, how="all")
+    if X.empty:
+        return []
     X = X.fillna(X.mean())
-    y = y.fillna(y.mean()) if np.issubdtype(y.dtype, np.number) else y.fillna(y.mode().iloc[0])
+    if X.isna().any().any():
+        X = X.fillna(0.0)
+
+    if task_type == "classification":
+        mode = y.mode(dropna=True)
+        fill_value = mode.iloc[0] if not mode.empty else "missing"
+        y_filled = y.fillna(fill_value)
+        encoded, uniques = pd.factorize(y_filled)
+        if len(uniques) <= 1:
+            return []
+        y_values = encoded
+    else:
+        if np.issubdtype(y.dtype, np.number):
+            y_numeric = y.astype(float)
+        else:
+            y_numeric = pd.to_numeric(y, errors="coerce")
+        if y_numeric.isna().all():
+            return []
+        y_values = y_numeric.fillna(y_numeric.mean())
 
     try:
         if task_type == "classification":
-            scores = mutual_info_classif(X, y)
+            scores = mutual_info_classif(X, y_values)
         else:
-            scores = mutual_info_regression(X, y)
+            scores = mutual_info_regression(X, y_values)
     except Exception:
         return []
 
@@ -132,8 +153,8 @@ def time_series_diagnostics(df: pd.DataFrame, datetime_column: str, target: str)
     ts_df = ts_df.dropna().sort_values(datetime_column)
 
     rolling = ts_df[target].rolling(window=min(30, len(ts_df))).agg(["mean", "var"])
-    diagnostics["rolling_mean"] = rolling["mean"].fillna(method="bfill").tolist()
-    diagnostics["rolling_var"] = rolling["var"].fillna(method="bfill").tolist()
+    diagnostics["rolling_mean"] = rolling["mean"].bfill().tolist()
+    diagnostics["rolling_var"] = rolling["var"].bfill().tolist()
 
     try:  # optional statsmodels
         from statsmodels.tsa.stattools import acf  # type: ignore[import]

@@ -14,6 +14,18 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 import pandas as pd
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module="visions.utils.monkeypatches.imghdr_patch",
+)
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module="matplotlib.cbook",
+)
 
 from .data_profiler import (
     compute_mutual_information,
@@ -47,7 +59,9 @@ def summarize_dataframe(df: pd.DataFrame, target: Optional[str] = None) -> Dict[
         describe = df.describe(include="all", datetime_is_numeric=True).transpose()
     except TypeError:
         describe = df.describe(include="all").transpose()
-    summary["statistics"] = describe.fillna("").to_dict(orient="index")
+    describe_clean = describe.astype(object)
+    describe_clean = describe_clean.where(pd.notna(describe_clean), None)
+    summary["statistics"] = describe_clean.to_dict(orient="index")
     summary["correlation"] = df.corr(numeric_only=True).fillna(0.0).to_dict()
 
     # Data health and integrity warnings.

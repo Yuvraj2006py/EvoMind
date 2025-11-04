@@ -632,6 +632,7 @@ class EvoMind:
                 np.asarray(X_train)[:200],
                 feature_names,
                 explanation_dir,
+                task_type=getattr(adapter, "task_type", schema.get("task_type", "regression")),
             )
 
         fairness_scores: Dict[str, float] = {}
@@ -689,9 +690,8 @@ class EvoMind:
             "feature_images": [str(path) for path in explanations.values() if isinstance(path, Path) and path.is_file()],
             "correlations": dataset_summary.get("correlation", {}),
             "correlation_image": None,
-            "mutual_info": mutual_info,
             "fairness": fairness_scores,
-                "mutual_info": mutual_info,
+            "mutual_info": mutual_info,
         }
         reports = build_report(self.output_dir / "reports", report_context)
 

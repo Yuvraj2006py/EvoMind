@@ -15,10 +15,20 @@ import pandas as pd
 import torch
 
 
-def _prepare_tensor_batch(model: torch.nn.Module, data: np.ndarray) -> np.ndarray:
+def _ensure_probabilities(logits: torch.Tensor, task_type: str) -> torch.Tensor:
+    if task_type == "classification":
+        if logits.ndim == 2 and logits.shape[1] > 1:
+            return torch.softmax(logits, dim=1)
+        return torch.sigmoid(logits)
+    return logits
+
+
+def _prepare_tensor_batch(model: torch.nn.Module, data: np.ndarray, task_type: str) -> np.ndarray:
     with torch.no_grad():
         tensor = torch.as_tensor(data, dtype=torch.float32)
-        preds = model(tensor).detach().cpu().numpy()
+        preds = model(tensor)
+        preds = _ensure_probabilities(preds, task_type)
+        preds = preds.detach().cpu().numpy()
     return preds
 
 
@@ -42,6 +52,8 @@ def generate_explanations(
     X_sample: np.ndarray,
     feature_names: Iterable[str],
     output_dir: Path,
+    *,
+    task_type: str = "regression",
 ) -> Dict[str, Path]:
     """
     Produce SHAP and LIME based explanation artifacts for the supplied model.
@@ -88,7 +100,7 @@ def generate_explanations(
         background = shap.kmeans(sample, min(20, sample_size))
 
         def predict(data: np.ndarray) -> np.ndarray:
-            return _prepare_tensor_batch(model, data)
+            return _prepare_tensor_batch(model, data, task_type)
 
         explainer = shap.KernelExplainer(predict, background)
         shap_values = explainer.shap_values(sample, nsamples=100)
@@ -149,7 +161,7 @@ def generate_explanations(
         for idx in range(min(5, sample_size)):
             exp = explainer.explain_instance(
                 sample[idx],
-                lambda x: _prepare_tensor_batch(model, x),
+                lambda x: _prepare_tensor_batch(model, x, task_type),
                 num_features=min(10, len(feature_names_list)),
             )
             html_path = lime_dir / f"lime_{idx}.html"
@@ -165,11 +177,11 @@ def generate_explanations(
     perm_scores = []
     try:
         model.eval()
-        baseline_preds = _prepare_tensor_batch(model, X_sample)
+        baseline_preds = _prepare_tensor_batch(model, X_sample, task_type)
         for idx, feature in enumerate(feature_names_list):
             X_permuted = X_sample.copy()
             np.random.shuffle(X_permuted[:, idx])
-            permuted_preds = _prepare_tensor_batch(model, X_permuted)
+            permuted_preds = _prepare_tensor_batch(model, X_permuted, task_type)
             importance = float(np.mean(np.abs(baseline_preds - permuted_preds)))
             perm_scores.append((feature, importance))
         pd.DataFrame(
@@ -205,7 +217,7 @@ def generate_explanations(
             for value in values:
                 X_copy = X_sample.copy()
                 X_copy[:, idx] = value
-                preds = _prepare_tensor_batch(model, X_copy)
+                preds = _prepare_tensor_batch(model, X_copy, task_type)
                 pdp_values.append(float(np.mean(preds)))
             plt.figure()
             plt.plot(values, pdp_values, marker="o")

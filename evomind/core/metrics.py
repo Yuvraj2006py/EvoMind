@@ -19,7 +19,10 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     mae = skmetrics.mean_absolute_error(y_true, y_pred)
     mse = skmetrics.mean_squared_error(y_true, y_pred)
     rmse = float(np.sqrt(mse))
-    r2 = skmetrics.r2_score(y_true, y_pred)
+    if y_true.size >= 2 and np.unique(y_true).size > 1:
+        r2 = float(skmetrics.r2_score(y_true, y_pred))
+    else:
+        r2 = 0.0
     mape = float(np.mean(np.abs((y_true - y_pred) / np.clip(np.abs(y_true), 1e-6, None))))
 
     return {
