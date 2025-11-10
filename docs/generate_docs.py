@@ -21,6 +21,8 @@ def build_config_reference() -> None:
     docs_dir = Path(__file__).resolve().parent
     target = docs_dir / "config_reference.md"
     write_markdown(target)
+    repo_root = docs_dir.parent
+    write_markdown(repo_root / "CONFIG.md")
 
 
 def build_api_docs() -> None:

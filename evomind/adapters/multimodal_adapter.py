@@ -5,7 +5,7 @@ Multimodal adapter combining text and numeric features.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,13 +26,16 @@ class MultimodalAdapter(ClassificationAdapter):
         text_column: str = "text",
         label_column: str = "label",
         schema: Optional[Dict[str, Any]] = None,
+        *,
+        data: Any | None = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         schema = schema or {}
         text_cols = schema.get("text") or []
         resolved_text = text_cols[0] if text_cols else text_column
         target = schema.get("target") if isinstance(schema.get("target"), str) else None
         resolved_label = target or label_column
-        super().__init__(schema=schema, default_target=resolved_label)
+        super().__init__(schema=schema, default_target=resolved_label, data=data, config=config)
         self.text_column = resolved_text
         self.vectorizer = TfidfVectorizer(max_features=3000)
         self.scaler = StandardScaler()
@@ -45,24 +48,19 @@ class MultimodalAdapter(ClassificationAdapter):
             raise ValueError(f"Dataset must contain the target column '{self.target_column}'.")
         return df
 
-    def preprocess(self, X_train: Any, X_val: Any) -> Tuple[Any, Any]:  # type: ignore[override]
-        X_train_df = pd.DataFrame(X_train)
-        X_val_df = pd.DataFrame(X_val)
-        text_train = X_train_df[self.text_column].astype(str)
-        text_val = X_val_df[self.text_column].astype(str)
-        X_train_vec = self.vectorizer.fit_transform(text_train)
-        X_val_vec = self.vectorizer.transform(text_val)
-
-        numeric_cols = [col for col in X_train_df.columns if col not in {self.text_column, self.target_column}]
+    def preprocess(self, df: pd.DataFrame) -> pd.DataFrame:  # type: ignore[override]
+        df = df.copy()
+        text = df[self.text_column].astype(str)
+        tfidf = self.vectorizer.fit_transform(text).toarray().astype(np.float32)
+        numeric_cols = [col for col in df.columns if col not in {self.text_column, self.target_column}]
         if numeric_cols:
-            X_train_num = self.scaler.fit_transform(X_train_df[numeric_cols])
-            X_val_num = self.scaler.transform(X_val_df[numeric_cols])
+            numeric_block = self.scaler.fit_transform(df[numeric_cols])
+            combined = np.hstack([tfidf, numeric_block])
         else:
-            X_train_num = np.empty((len(X_train_df), 0))
-            X_val_num = np.empty((len(X_val_df), 0))
+            combined = tfidf
 
-        X_train_combined = np.hstack([X_train_vec.toarray(), X_train_num])
-        X_val_combined = np.hstack([X_val_vec.toarray(), X_val_num])
-        text_features = list(self.vectorizer.get_feature_names_out())
-        self.feature_names_ = text_features + numeric_cols
-        return X_train_combined.astype(np.float32), X_val_combined.astype(np.float32)
+        feature_names = list(self.vectorizer.get_feature_names_out()) + numeric_cols
+        processed = pd.DataFrame(combined, columns=feature_names, index=df.index)
+        processed[self.target_column] = df[self.target_column].values
+        self.feature_names_ = feature_names
+        return processed

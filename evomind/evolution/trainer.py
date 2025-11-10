@@ -97,7 +97,7 @@ class Trainer:
             preds = model(X_val_t)
             latency = time.perf_counter() - start
 
-        metrics = adapter.evaluate_model(model, X_val_t, y_val_t)
+        metrics = adapter.evaluate(model, X_val_t, y_val_t)
         metrics.update(
             {
                 "latency": latency,
@@ -143,7 +143,7 @@ class Trainer:
             for _, idx in kf.split(range(n_samples)):
                 subset_X = X_val[idx]
                 subset_y = y_val[idx]
-                subset_metrics = adapter.evaluate_model(model, subset_X, subset_y)
+                subset_metrics = adapter.evaluate(model, subset_X, subset_y)
                 _, fold_score, _ = self._select_primary_metric(subset_metrics, task_type)
                 if fold_score is not None:
                     val_scores.append(float(fold_score))
@@ -151,7 +151,7 @@ class Trainer:
             metrics["cv_score_std"] = float(np.std(val_scores))
 
         # Overfit indicator.
-        train_metrics = adapter.evaluate_model(model, X_train, y_train)
+        train_metrics = adapter.evaluate(model, X_train, y_train)
         _, train_score, _ = self._select_primary_metric(train_metrics, task_type)
         if train_score is not None and primary_val_score is not None:
             if higher_is_better:

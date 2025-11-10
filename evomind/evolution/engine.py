@@ -12,7 +12,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import os
+import sys
 from dataclasses import dataclass, replace
+import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -97,12 +100,25 @@ class ParallelExecutor:
     """Abstraction over Ray or local thread pools used for genome evaluation."""
 
     def __init__(self, backend: str, max_workers: Optional[int]) -> None:
+        self._logger = logging.getLogger(__name__)
         backend = backend.lower()
+        disable_ray = os.environ.get("EVOMIND_DISABLE_RAY", "").lower() in {"1", "true", "yes", "on"}
+        on_windows = sys.platform.startswith("win")
         if backend == "auto":
-            backend = "ray" if _ensure_ray_init() else "threads"
+            backend = "ray"
+        if backend == "ray":
+            if disable_ray:
+                self._logger.info("EVOMIND_DISABLE_RAY detected. Using threaded execution.")
+                backend = "threads"
+            elif on_windows:
+                self._logger.info("Ray disabled on Windows. Using threaded execution to avoid shared memory issues.")
+                backend = "threads"
+            elif not _ensure_ray_init():
+                self._logger.info("Ray unavailable. Falling back to threaded execution.")
+                backend = "threads"
         self.backend = backend if backend in {"ray", "threads"} else "threads"
         self.max_workers = max_workers
-        self._logger = logging.getLogger(__name__)
+        self._last_stats: Dict[str, object] = {}
 
     def map(self, payloads: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
         if self.backend == "ray" and ray is not None:
@@ -121,6 +137,27 @@ class ParallelExecutor:
         workers = self.max_workers or min(8, max(1, len(payloads)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(_evaluate_payload, payloads))
+
+    def snapshot(self, payloads: int, duration: float) -> Dict[str, object]:
+        stats: Dict[str, object] = {
+            "backend": self.backend,
+            "payloads": payloads,
+            "duration": round(duration, 3),
+            "max_workers": self.max_workers,
+        }
+        if self.backend == "threads":
+            stats["worker_count"] = self.max_workers or min(8, max(1, payloads))
+        if self.backend == "ray" and ray is not None and ray.is_initialized():  # pragma: no cover - ray optional
+            try:
+                stats["cluster_resources"] = {k: float(v) for k, v in ray.cluster_resources().items()}
+                stats["available_resources"] = {k: float(v) for k, v in ray.available_resources().items()}
+            except Exception:
+                self._logger.debug("Unable to query Ray resources", exc_info=True)
+        self._last_stats = stats
+        return stats
+
+    def last_stats(self) -> Dict[str, object]:
+        return dict(self._last_stats)
 
 
 class EvolutionEngine:
@@ -160,6 +197,7 @@ class EvolutionEngine:
         self.config = config or EvolutionConfig()
         self.executor = ParallelExecutor(self.config.parallel_backend, self.config.max_workers)
         self.ensemble_model: Optional[object] = None
+        self.executor_stats_history: List[Dict[str, object]] = []
 
     def _build_payloads(
         self,
@@ -212,12 +250,16 @@ class EvolutionEngine:
         """
 
         payloads = self._build_payloads(adapter, dataset)
+        start_time = time.perf_counter()
         # Fault tolerance: re-run sequentially if the backend raises.
         with contextlib.suppress(Exception):
             results = self.executor.map(payloads)
         if "results" not in locals():  # pragma: no cover - fallback path
             self.logger.log_message("Parallel executor failed; falling back to sequential evaluation.")
             results = [_evaluate_payload(payload) for payload in payloads]
+
+        duration = time.perf_counter() - start_time
+        self.executor.snapshot(payloads=len(payloads), duration=duration)
 
         metrics_by_id = {item["genome_id"]: item["metrics"] for item in results}
 
@@ -318,7 +360,7 @@ class EvolutionEngine:
         adapter: "BaseTaskAdapter",
         dataset: Tuple,
         generation_idx: int,
-    ) -> Tuple[Dict[str, float], Genome, List[Dict[str, object]]]:
+    ) -> Tuple[Dict[str, float], Genome, List[Dict[str, object]], Dict[str, object]]:
         """Full generation loop: evaluation + reproduction + ensemble synthesis."""
 
         evaluated = self.evaluate_generation(adapter, dataset, generation_idx)
@@ -354,6 +396,9 @@ class EvolutionEngine:
             )
 
         best_genome = evaluated[0] if evaluated else Genome(layers=[])
+        snapshot = self.executor.last_stats()
+        snapshot["generation"] = generation_idx
+        self.executor_stats_history.append(snapshot)
         return (
             {
                 "generation": generation_idx,
@@ -361,4 +406,5 @@ class EvolutionEngine:
             },
             best_genome,
             lineage,
+            snapshot,
         )

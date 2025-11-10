@@ -117,3 +117,37 @@ def write_markdown(path: Path, section: Optional[str] = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def to_console(section: Optional[str] = None) -> str:
+    """Format the configuration reference as a console-friendly table."""
+
+    if section:
+        if section not in CONFIG_SCHEMA:
+            raise KeyError(f"Unknown config section '{section}'. Options: {list(CONFIG_SCHEMA)}")
+        sections = {section: CONFIG_SCHEMA[section]}
+    else:
+        sections = CONFIG_SCHEMA
+
+    lines = []
+    for sec_name, fields in sections.items():
+        lines.append(f"[{sec_name.upper()}]")
+        for field in fields.values():
+            default_repr = "None" if field.default is None else repr(field.default)
+            description = field.description or "No description available."
+            lines.append(
+                f"  - {field.name} (type={field.type}, default={default_repr}): {description}"
+            )
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+__all__ = [
+    "ConfigField",
+    "CONFIG_SCHEMA",
+    "iter_fields",
+    "as_dict",
+    "to_markdown",
+    "write_markdown",
+    "to_console",
+]

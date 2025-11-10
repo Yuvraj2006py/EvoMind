@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from glob import glob
 from pathlib import Path
 
 from evomind import EvoMind
@@ -31,14 +32,27 @@ def _default_config_path(path: str) -> Path:
     raise FileNotFoundError(f"Configuration file not found: {candidate}")
 
 
+def _resolve_data_sources(sources: list[str]) -> list[str]:
+    resolved: list[str] = []
+    for item in sources:
+        matches = glob(item)
+        if matches:
+            resolved.extend(matches)
+        else:
+            resolved.append(item)
+    return resolved
+
+
 def _run_command(args: argparse.Namespace) -> None:
     config_source = _default_config_path(args.config) if args.config else None
+    data_sources = _resolve_data_sources(args.data)
     em = EvoMind(
-        data=args.data,
+        data=data_sources if len(data_sources) > 1 else data_sources[0],
         task=args.task or "auto",
         profile=args.profile,
         insights=not args.no_insights,
         config=config_source,
+        run_name=args.run_name,
     )
     result = em.run()
     print(json.dumps({"run_id": result.run_id, "metrics": result.metrics}, indent=2))
@@ -80,6 +94,96 @@ def _doctor_command(_: argparse.Namespace) -> None:
             print(f"  {details}")
 
 
+def _create_adapter_command(args: argparse.Namespace) -> None:
+    adapters_dir = Path("evomind") / "adapters"
+    adapters_dir.mkdir(parents=True, exist_ok=True)
+    raw_name = args.name.strip().lower().replace("-", "_")
+    file_path = adapters_dir / f"{raw_name}_adapter.py"
+    if file_path.exists():
+        raise SystemExit(f"Adapter scaffold already exists: {file_path}")
+    class_name = "".join(part.capitalize() for part in raw_name.split("_")) + "Adapter"
+    template = f'''"""
+Scaffold for the `{raw_name}` adapter.
+
+Use this file to implement ``load_data``, ``preprocess``, ``train`` and
+``evaluate`` for your custom domain.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import pandas as pd
+
+from evomind.adapters import register_task
+from evomind.adapters.base_adapter import BaseAdapter
+from evomind.exceptions import EvoMindAdapterError
+
+
+@register_task("{raw_name}")
+class {class_name}(BaseAdapter):
+    """Describe what problem this adapter solves."""
+
+    def __init__(
+        self,
+        schema: Optional[Dict[str, Any]] = None,
+        *,
+        data: Any | None = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(schema=schema, data=data, config=config)
+        self.target_column = self.target_column or "target"
+
+    def load_data(self) -> pd.DataFrame:
+        """
+        Load the raw dataset.
+
+        Replace this stub with logic that reads from files, APIs, or databases.
+        Access the datasource via ``self.data_source``.
+        """
+        if self.data_source is None:
+            raise EvoMindAdapterError("Data source missing.", context={{"adapter": "{class_name}"}})
+        if isinstance(self.data_source, pd.DataFrame):
+            return self.data_source.copy()
+        path = Path(self.data_source)
+        return pd.read_csv(path)
+
+    def preprocess(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply light feature engineering.
+
+        The returned dataframe must include the ``self.target_column``.
+        """
+        if not self.target_column:
+            self.target_column = "target"
+        return df
+
+    def train(self, X, y) -> Any:
+        """Train a lightweight baseline model for benchmarking."""
+        raise NotImplementedError("Implement your training routine here.")
+
+    def evaluate(self, model, X_test, y_test) -> Dict[str, float]:
+        """Compute evaluation metrics for the trained model."""
+        raise NotImplementedError("Implement evaluation for your model type.")
+'''
+    file_path.write_text(template, encoding="utf-8")
+    print(f"Adapter scaffold created at {file_path}")
+
+
+def _describe_config_command(args: argparse.Namespace) -> None:
+    if args.key:
+        print(EvoMind.explain(args.key))
+        return
+    EvoMind.describe_config(section=args.section, as_markdown=args.markdown, to_console=True)
+
+
+def _generate_config_docs_command(args: argparse.Namespace) -> None:
+    output = Path(args.output)
+    path = EvoMind.generate_config_docs(output)
+    print(f"Configuration reference generated at {path.resolve()}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evomind", description="EvoMind AutoML SDK CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -87,12 +191,18 @@ def build_parser() -> argparse.ArgumentParser:
     profile_choices = sorted(list_profiles().keys())
 
     run_parser = subparsers.add_parser("run", help="Execute an EvoMind AutoML run.")
-    run_parser.add_argument("--data", required=True, help="Path to dataset file.")
+    run_parser.add_argument(
+        "--data",
+        required=True,
+        action="append",
+        help="Dataset source(s). Provide multiple --data flags to load and merge several files.",
+    )
     run_parser.add_argument("--task", default="auto", help="Task identifier or 'auto'.")
     run_parser.add_argument("--config", help="Optional configuration file (YAML/JSON).")
     run_parser.add_argument("--no-insights", action="store_true", help="Disable insight generation.")
     run_parser.add_argument("--export", choices=["html", "pdf"], help="Export report in the selected format.")
     run_parser.add_argument("--profile", choices=profile_choices, help="Apply a configuration profile before overrides.")
+    run_parser.add_argument("--run-name", help="Optional custom name used for run directories (slugified).")
     run_parser.set_defaults(func=_run_command)
 
     list_parser = subparsers.add_parser("list-models", help="List models registered in the local registry.")
@@ -104,6 +214,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor", help="Run environment diagnostics.")
     doctor_parser.set_defaults(func=_doctor_command)
+
+    adapter_parser = subparsers.add_parser("create-adapter", help="Generate a domain adapter scaffold.")
+    adapter_parser.add_argument("name", help="Adapter identifier (snake_case).")
+    adapter_parser.set_defaults(func=_create_adapter_command)
+
+    describe_parser = subparsers.add_parser("describe-config", help="Display EvoMind configuration schema.")
+    describe_parser.add_argument("--section", help="Optional configuration section to filter.")
+    describe_parser.add_argument("--markdown", action="store_true", help="Render the output as markdown.")
+    describe_parser.add_argument("--key", help="Explain a single configuration key instead of listing the table.")
+    describe_parser.set_defaults(func=_describe_config_command)
+
+    config_doc_parser = subparsers.add_parser("generate-config-docs", help="Write CONFIG.md from the schema.")
+    config_doc_parser.add_argument("--output", default="CONFIG.md", help="Destination markdown file (default: CONFIG.md).")
+    config_doc_parser.set_defaults(func=_generate_config_docs_command)
 
     return parser
 

@@ -7,10 +7,11 @@ from __future__ import annotations
 import numpy as np
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
-from torch import nn
 
 from evomind.adapters import register_task
 from evomind.adapters.tabular_base import TabularAdapter
@@ -25,37 +26,71 @@ class ClassificationAdapter(TabularAdapter):
     Splits are stratified to maintain class balance.
     """
 
-    def __init__(self, schema: Optional[Dict[str, Any]] = None, default_target: str = "target") -> None:
-        super().__init__(task_type="classification", schema=schema, default_target=default_target)
-
-    def evaluate_model(self, model: nn.Module, X_val: Any, y_val: Any) -> Dict[str, float]:
-        logits = model(X_val)
-        probabilities = torch.softmax(logits, dim=1) if logits.shape[1] > 1 else torch.sigmoid(logits)
-        probabilities_detached = probabilities.detach()
-        predictions = (
-            torch.argmax(probabilities_detached, dim=1)
-            if probabilities_detached.ndim > 1
-            else (probabilities_detached > 0.5).long().view(-1)
+    def __init__(
+        self,
+        schema: Optional[Dict[str, Any]] = None,
+        default_target: str = "target",
+        *,
+        data: Any | None = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            task_type="classification",
+            schema=schema,
+            default_target=default_target,
+            data=data,
+            config=config,
         )
-        targets = torch.argmax(y_val, dim=1) if y_val.ndim > 1 else y_val.view(-1).long()
 
-        accuracy = float(accuracy_score(targets.cpu().numpy(), predictions.cpu().numpy()))
+    def train(self, X, y) -> LogisticRegression:
+        model = LogisticRegression(max_iter=int(self.config.get("max_iter", 400)))
+        model.fit(self._ensure_ndarray(X), self._ensure_ndarray(y).ravel())
+        self.baseline_model_ = model
+        return model
+
+    def evaluate(self, model, X_val: Any, y_val: Any) -> Dict[str, float]:
+        X_np = self._ensure_ndarray(X_val)
+        y_np = self._ensure_ndarray(y_val)
+        if y_np.ndim > 1:
+            targets = np.argmax(y_np, axis=1)
+        else:
+            targets = y_np.astype(int).ravel()
+
+        if hasattr(model, "predict_proba"):
+            probs = np.asarray(model.predict_proba(X_np), dtype=np.float32)
+            preds = probs.argmax(axis=1)
+            logits = torch.from_numpy(probs)
+        else:
+            tensor = torch.as_tensor(X_np, dtype=torch.float32)
+            with torch.no_grad():
+                logits = model(tensor)
+            if logits.ndim == 1 or logits.shape[1] == 1:
+                probs = torch.sigmoid(logits).cpu().numpy().reshape(-1, 1)
+                preds = (probs.ravel() > 0.5).astype(int)
+            else:
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+                preds = probs.argmax(axis=1)
+
+        accuracy = float(accuracy_score(targets, preds))
         precision, recall, f1, _ = precision_recall_fscore_support(
-            targets.cpu().numpy(),
-            predictions.cpu().numpy(),
-            average="weighted",
-            zero_division=0,
+            targets, preds, average="weighted", zero_division=0
         )
 
         roc_auc = None
-        if probabilities_detached.ndim > 1 and probabilities_detached.shape[1] == 2:
-            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities_detached[:, 1].cpu().numpy())
-        elif probabilities_detached.ndim == 1:
-            roc_auc = roc_auc_score(targets.cpu().numpy(), probabilities_detached.cpu().numpy())
+        if probs.shape[1] == 2:
+            roc_auc = roc_auc_score(targets, probs[:, 1])
+        elif probs.shape[1] == 1:
+            roc_auc = roc_auc_score(targets, probs[:, 0])
 
-        loss = F.binary_cross_entropy(probabilities, y_val.float()) if probabilities.ndim == 1 else F.cross_entropy(
-            logits, targets
-        )
+        logits_tensor = torch.from_numpy(probs) if isinstance(probs, np.ndarray) else logits
+        targets_tensor = torch.as_tensor(targets, dtype=torch.long)
+        if logits_tensor.ndim == 1 or logits_tensor.shape[1] == 1:
+            loss = F.binary_cross_entropy(
+                torch.clamp(logits_tensor.squeeze(), 1e-6, 1 - 1e-6),
+                targets_tensor.float(),
+            )
+        else:
+            loss = F.cross_entropy(torch.as_tensor(logits, dtype=torch.float32), targets_tensor)
 
         metrics = {
             "val_loss": float(loss.item()),
@@ -75,3 +110,13 @@ class ClassificationAdapter(TabularAdapter):
             + 0.3 * metrics.get("f1_score", 0.0)
             - 0.2 * metrics.get("val_loss", 0.0)
         )
+
+    @staticmethod
+    def _ensure_ndarray(data: Any) -> np.ndarray:
+        if isinstance(data, np.ndarray):
+            return data
+        if torch.is_tensor(data):
+            return data.detach().cpu().numpy()
+        if hasattr(data, "to_numpy"):
+            return data.to_numpy()
+        return np.asarray(data)

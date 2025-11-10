@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
+from sklearn.model_selection import train_test_split
 
 from evomind.adapters.regression_adapter import RegressionAdapter
 from evomind.core.task_detector import detect_task_type
@@ -24,20 +26,23 @@ def test_regression_adapter_end_to_end(tmp_path: Path) -> None:
     )
     data_path = _write_csv(tmp_path / "reg.csv", df)
 
-    adapter = RegressionAdapter()
-    X_train, y_train, X_val, y_val = adapter.load_data(data_path)
-    X_train_processed, X_val_processed = adapter.preprocess(X_train, X_val)
+    adapter = RegressionAdapter(schema={"target": "target"}, data=data_path)
+    processed = adapter.preprocess(adapter.load_data())
 
-    assert X_train_processed.shape[1] == len(adapter.feature_names_)
+    feature_matrix = processed.drop(columns=[adapter.target_column]).to_numpy(dtype=np.float32)
+    target_vector = processed[adapter.target_column].to_numpy(dtype=np.float32)
+    assert feature_matrix.shape[1] == len(adapter.feature_names_)
+
+    X_train, X_val, y_train, y_val = train_test_split(feature_matrix, target_vector, test_size=0.2, random_state=42)
 
     genome = Genome(layers=[LayerSpec("dense", {"units": 8, "activation": "relu"})])
-    model = adapter.build_model(genome, input_dim=X_train_processed.shape[1], output_dim=1)
+    model = adapter.build_model(genome, input_dim=feature_matrix.shape[1], output_dim=1)
     model.eval()
 
-    torch_val = torch.from_numpy(X_val_processed).float()
-    y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).view(-1, 1)
+    torch_val = torch.from_numpy(X_val).float()
+    y_val_tensor = torch.from_numpy(y_val.reshape(-1, 1)).float()
 
-    metrics = adapter.evaluate_model(model, torch_val, y_val_tensor)
+    metrics = adapter.evaluate(model, torch_val, y_val_tensor)
     assert {"val_loss", "val_mae", "rmse", "r2_score"}.issubset(metrics.keys())
     assert isinstance(adapter.fitness(metrics), float)
 
@@ -55,9 +60,8 @@ def test_regression_adapter_coerces_numeric_target(tmp_path: Path) -> None:
     )
     data_path = _write_csv(tmp_path / "prices.csv", df)
 
-    adapter = RegressionAdapter(schema={"target": "Price"})
-    X_train, y_train, X_val, y_val = adapter.load_data(data_path)
-
-    for series in (y_train, y_val):
-        assert series.dtype.kind in {"f", "i"}
-        assert series.notna().all()
+    adapter = RegressionAdapter(schema={"target": "Price"}, data=data_path)
+    processed = adapter.preprocess(adapter.load_data())
+    series = processed[adapter.target_column]
+    assert series.dtype.kind in {"f", "i"}
+    assert series.notna().all()

@@ -10,13 +10,15 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Ensure package imports resolve when running `streamlit run dashboard/app.py`.
 ROOT_DIR = Path(__file__).resolve().parent
@@ -63,6 +65,137 @@ body, .stApp { background-color: #fafafa; color: #202124; }
 .stDownloadButton>button { background-color: #1976d2; color: #fff; }
 </style>
 """
+
+
+def _estimate_fitness_change(
+    base_fitness: float,
+    base_population: float,
+    base_mutation: float,
+    base_crossover: float,
+    population: float,
+    mutation: float,
+    crossover: float,
+) -> Tuple[float, float]:
+    baseline = base_fitness or 1.0
+    population_factor = np.log1p(max(population - base_population, -base_population + 1)) * 0.05
+    mutation_factor = -abs(mutation - base_mutation) * 0.2 + 0.05
+    crossover_factor = (crossover - base_crossover) * 0.1
+    estimated = baseline * (1 + population_factor + mutation_factor + crossover_factor)
+    return estimated, estimated - baseline
+
+
+def render_what_if_panel(history_df: pd.DataFrame, config: Dict, model_metrics: Dict[str, float]) -> None:
+    with st.expander("🧪 What-if Simulator", expanded=False):
+        if history_df.empty or not config:
+            st.info("Simulation requires history and config metadata from a completed run.")
+            return
+        engine_cfg = config.get("engine", {})
+        base_population = int(engine_cfg.get("population", 20))
+        base_mutation = float(engine_cfg.get("mutation_rate", 0.3))
+        base_crossover = float(engine_cfg.get("crossover_rate", 0.6))
+        best_fitness = float(history_df["best_fitness"].max())
+
+        population = st.slider("Population Size", 10, 200, base_population, step=5)
+        mutation = st.slider("Mutation Rate", 0.05, 0.9, base_mutation, step=0.05)
+        crossover = st.slider("Crossover Rate", 0.1, 0.9, base_crossover, step=0.05)
+
+        with st.spinner("Estimating impact..."):
+            estimated, delta = _estimate_fitness_change(
+                best_fitness, base_population, base_mutation, base_crossover, population, mutation, crossover
+            )
+        st.metric("Projected Fitness", f"{estimated:.3f}", delta=f"{delta:+.3f}")
+        st.caption(
+            "Heuristic projection combining run history with configurable hyperparameters. "
+            "Use for directional insight rather than absolute guarantees."
+        )
+        progress = min(max((estimated / (best_fitness + 1e-6)) * 0.5 + 0.5, 0), 1)
+        st.progress(progress)
+
+
+def render_worker_monitor(executor_stats: Dict[str, Any]) -> None:
+    st.subheader("Real-time Worker Monitor")
+    if not executor_stats:
+        st.info("Worker telemetry unavailable for this run.")
+        return
+    backend = executor_stats.get("backend", "threads")
+    history = executor_stats.get("history") or []
+    worker_count = executor_stats.get("worker_count") or executor_stats.get("max_workers") or "auto"
+    payloads = history[-1]["payloads"] if history else executor_stats.get("payloads", 0)
+    cols = st.columns(3)
+    cols[0].metric("Backend", backend.title())
+    cols[1].metric("Workers", worker_count)
+    cols[2].metric("Last Payloads", payloads)
+
+    if history:
+        df = pd.DataFrame(history)
+        if "generation" not in df.columns:
+            df["generation"] = range(len(df))
+        duration_fig = px.line(df, x="generation", y="duration", markers=True, title="Evaluation Duration (s)")
+        duration_fig.update_layout(showlegend=False)
+        st.plotly_chart(duration_fig, use_container_width=True)
+
+    if backend == "ray":
+        available = executor_stats.get("available_resources")
+        if available:
+            st.caption("Ray cluster resources")
+            st.json(available)
+
+
+def render_feature_metric_network(fi_df: pd.DataFrame, metrics: Dict[str, float]) -> None:
+    if fi_df.empty or not metrics:
+        return
+    st.subheader("Feature → Metric Influence Graph")
+    feature_nodes = fi_df.head(8)
+    metric_items = [
+        (name, value)
+        for name, value in metrics.items()
+        if isinstance(value, (int, float, np.floating)) and not np.isnan(value)
+    ]
+    if not feature_nodes.empty and metric_items:
+        metric_items = metric_items[:5]
+        graph = nx.Graph()
+        for feature in feature_nodes["feature"]:
+            graph.add_node(feature, bipartite=0)
+        for metric, value in metric_items:
+            graph.add_node(metric, bipartite=1)
+            for _, row in feature_nodes.iterrows():
+                weight = abs(row["importance"]) * (abs(value) + 1e-6)
+                graph.add_edge(row["feature"], metric, weight=weight)
+        pos = nx.spring_layout(graph, seed=42)
+        traces = []
+        for edge in graph.edges(data=True):
+            traces.append(
+                go.Scatter(
+                    x=[pos[edge[0]][0], pos[edge[1]][0]],
+                    y=[pos[edge[0]][1], pos[edge[1]][1]],
+                    mode="lines",
+                    line=dict(width=max(1.0, edge[2]["weight"] * 5), color="#90caf9"),
+                    hoverinfo="text",
+                    text=f"{edge[0]} → {edge[1]}: {edge[2]['weight']:.3f}",
+                )
+            )
+        node_trace = go.Scatter(
+            x=[pos[node][0] for node in graph.nodes()],
+            y=[pos[node][1] for node in graph.nodes()],
+            mode="markers+text",
+            text=list(graph.nodes()),
+            textposition="top center",
+            marker=dict(size=14, color="#4dd0e1"),
+        )
+        fig = go.Figure(traces + [node_trace])
+        fig.update_layout(showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def trigger_success_animation(manifest: Dict) -> None:
+    run_id = manifest.get("run_id")
+    if not run_id:
+        return
+    if st.session_state.get("celebrated_run") == run_id:
+        return
+    st.session_state["celebrated_run"] = run_id
+    st.success("Run loaded successfully! 🎉")
+    st.balloons()
 
 
 def load_json(path: Optional[str]) -> Dict:
@@ -191,7 +324,13 @@ def resolve_path(path_str: Optional[str]) -> Optional[Path]:
     return Path(path_str)
 
 
-def render_overview(history_df: pd.DataFrame, model_metrics: Dict[str, float], stability: str) -> None:
+def render_overview(
+    history_df: pd.DataFrame,
+    model_metrics: Dict[str, float],
+    stability: str,
+    config: Dict,
+    executor_stats: Dict[str, Any],
+) -> None:
     st.subheader("Experiment Summary")
     if history_df.empty:
         st.info("History file not found. Run an experiment to populate the dashboard.")
@@ -215,6 +354,9 @@ def render_overview(history_df: pd.DataFrame, model_metrics: Dict[str, float], s
         for idx, (name, value) in enumerate(metric_items):
             cols[idx % num_cols].metric(name.replace("_", " ").title(), f"{value:.4f}")
 
+    render_what_if_panel(history_df, config, model_metrics)
+    render_worker_monitor(executor_stats)
+
 
 def render_insights(manifest: Dict) -> None:
     st.subheader("Insight Narrative")
@@ -231,12 +373,17 @@ def render_insights(manifest: Dict) -> None:
     summary_data = load_json(str(summary_path)) if summary_path else {}
     statistics = summary_data.get("statistics", {}) if isinstance(summary_data, dict) else {}
 
+    metrics = manifest.get("model_metrics", {})
+
     feature_importance_path = explanations.get("feature_importance")
     fi_df = load_csv(feature_importance_path) if feature_importance_path else pd.DataFrame()
     if not fi_df.empty:
         render_bar_chart("Feature Importance", feature_importance_bar(fi_df))
+        with st.expander("Raw feature importance values", expanded=False):
+            st.dataframe(fi_df)
     elif feature_importance_path:
         st.info("Feature importance data not available.")
+    render_feature_metric_network(fi_df, metrics)
 
     shap_summary_path = explanations.get("shap_summary")
     if shap_summary_path:
@@ -269,7 +416,15 @@ def render_insights(manifest: Dict) -> None:
 
     lime_dir = explanations.get("lime_dir")
     if lime_dir:
-        st.caption(f"LIME explanations stored in {lime_dir}")
+        lime_path = Path(lime_dir)
+        html_files = sorted(lime_path.glob("*.html"))
+        if html_files:
+            st.subheader("Interactive LIME Explorer")
+            selected = st.selectbox("Sample", [file.name for file in html_files])
+            html_path = lime_path / selected
+            components.html(html_path.read_text(encoding="utf-8"), height=420, scrolling=True)
+        else:
+            st.caption(f"LIME explanations stored in {lime_dir}")
 
     fitness_log_info = manifest.get("model_fitness_log", {})
     fitness_log_path = resolve_path(fitness_log_info.get("latest") or fitness_log_info.get("archive"))
@@ -318,7 +473,7 @@ def render_insights(manifest: Dict) -> None:
             st.info("What-if analysis requires numeric feature statistics; none were detected.")
 
 
-def render_lineage_section(manifest: Dict) -> None:
+def render_lineage_section(manifest: Dict, history_df: pd.DataFrame) -> None:
     lineage_info = manifest.get("lineage", {})
     lineage_path = resolve_path(lineage_info.get("archive") or lineage_info.get("latest"))
     if not lineage_path or not lineage_path.exists():
@@ -334,6 +489,24 @@ def render_lineage_section(manifest: Dict) -> None:
         st.info("Lineage visualisation will appear once enough generations are logged.")
     else:
         render_scatter("Architecture Lineage", fig)
+
+    if not history_df.empty:
+        st.subheader("Lineage Replay")
+        max_generation = int(history_df["generation"].max())
+        min_generation = int(history_df["generation"].min())
+        if max_generation == min_generation:
+            selected = max_generation
+            st.info("Only one generation recorded; replay slider disabled.")
+        else:
+            selected = st.slider("Generation", min_generation, max_generation, value=max_generation)
+        current_row = history_df.loc[history_df["generation"] == selected]
+        if not current_row.empty:
+            fitness_value = float(current_row["best_fitness"].iloc[0])
+            st.metric("Fitness at Generation", f"{fitness_value:.4f}", delta=None)
+        timeline_fig = px.line(history_df, x="generation", y="best_fitness", markers=True)
+        timeline_fig.add_vline(x=selected, line_dash="dash", line_color="#ef5350")
+        timeline_fig.update_layout(showlegend=False, title="Fitness Timeline Replay")
+        st.plotly_chart(timeline_fig, use_container_width=True)
 
 
 def render_reports(manifest: Dict) -> None:
@@ -373,9 +546,10 @@ def main() -> None:
     st.markdown(DARK_THEME if theme_choice == "Dark" else LIGHT_THEME, unsafe_allow_html=True)
     st.title("EvoMind Evolution Dashboard")
 
-    latest_manifest_path = EXPERIMENTS_DIR / "manifest.json"
-    latest_manifest = load_manifest(latest_manifest_path)
-    run_manifests = list_run_manifests()
+    with st.spinner("Loading experiment manifests..."):
+        latest_manifest_path = EXPERIMENTS_DIR / "manifest.json"
+        latest_manifest = load_manifest(latest_manifest_path)
+        run_manifests = list_run_manifests()
 
     if not latest_manifest and not run_manifests:
         st.warning("No experiments found. Run `python main.py --data ...` first.")
@@ -400,6 +574,8 @@ def main() -> None:
         st.error("Unable to load manifest for the selected run.")
         return
 
+    trigger_success_animation(manifest)
+
     with st.sidebar.expander("Run Details", expanded=False):
         st.write(f"**Run ID:** {manifest.get('run_id')}")
         st.write(f"**Stability:** {manifest.get('model_stability', 'Unknown')}")
@@ -411,6 +587,14 @@ def main() -> None:
                     st.write(f"- {name}: {value:.4f}")
                 else:
                     st.write(f"- {name}: {value}")
+        sources = manifest.get("data_sources") or []
+        if sources:
+            st.write("**Data Sources:**")
+            for src in sources[:3]:
+                st.write(f"- {src}")
+            if len(sources) > 3:
+                remaining = len(sources) - 3
+                st.write(f"... and {remaining} more")
         model_card_path = manifest.get("model_card")
         if model_card_path:
             st.markdown(f"[Open Model Card]({model_card_path})")
@@ -420,13 +604,24 @@ def main() -> None:
             st.markdown(f"[Latest Report]({latest_html})")
 
     page = st.sidebar.radio("Sections", ["Overview", "Insights", "Data Profile", "Lineage", "Reports"])
+    config_blob = manifest.get("config") or {}
+    executor_stats = manifest.get("executor") or {}
 
     history_info = manifest.get("history", {})
     history_path = resolve_path(history_info.get("latest") or history_info.get("archive"))
     history_df = load_csv(history_path) if history_path else pd.DataFrame()
+    if not history_df.empty and "generation" not in history_df.columns:
+        history_df = history_df.reset_index(drop=True)
+        history_df.insert(0, "generation", history_df.get("generation", range(len(history_df))))
 
     if page == "Overview":
-        render_overview(history_df, manifest.get("model_metrics", {}), manifest.get("model_stability", "Unknown"))
+        render_overview(
+            history_df,
+            manifest.get("model_metrics", {}),
+            manifest.get("model_stability", "Unknown"),
+            config_blob,
+            executor_stats,
+        )
     elif page == "Insights":
         render_insights(manifest)
     elif page == "Data Profile":
@@ -444,7 +639,7 @@ def main() -> None:
             correlation_network=lambda threshold: render_correlation_network(correlation_data, threshold),
         )
     elif page == "Lineage":
-        render_lineage_section(manifest)
+        render_lineage_section(manifest, history_df)
     elif page == "Reports":
         render_reports(manifest)
 

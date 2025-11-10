@@ -1,8 +1,9 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
+from sklearn.model_selection import train_test_split
 
 from evomind.adapters.classification_adapter import ClassificationAdapter
 from evomind.core.task_detector import detect_task_type
@@ -25,25 +26,23 @@ def test_classification_adapter_end_to_end(tmp_path: Path) -> None:
     )
     data_path = _write_csv(tmp_path / "cls.csv", df)
 
-    adapter = ClassificationAdapter()
-    X_train, y_train, X_val, y_val = adapter.load_data(data_path)
-    X_train_processed, X_val_processed = adapter.preprocess(X_train, X_val)
+    adapter = ClassificationAdapter(schema={"target": "target"}, data=data_path)
+    processed = adapter.preprocess(adapter.load_data())
+    X = processed.drop(columns=[adapter.target_column]).to_numpy(dtype=np.float32)
+    y = processed[adapter.target_column].to_numpy(dtype=int)
 
-    assert X_train_processed.shape[1] == len(adapter.feature_names_)
-    assert adapter.label_encoder is not None
+    assert X.shape[1] == len(adapter.feature_names_)
 
+    X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, random_state=42, test_size=0.5)
     genome = Genome(layers=[LayerSpec("dense", {"units": 8, "activation": "relu"})])
-    output_dim = len(adapter.label_encoder.classes_)
-    model = adapter.build_model(genome, input_dim=X_train_processed.shape[1], output_dim=output_dim)
+    output_dim = int(np.max(y) + 1)
+    model = adapter.build_model(genome, input_dim=X.shape[1], output_dim=output_dim)
     model.eval()
 
-    torch_val = torch.from_numpy(X_val_processed).float()
-    y_val_tensor = F.one_hot(
-        torch.tensor(y_val.values, dtype=torch.int64),
-        num_classes=output_dim,
-    ).float()
+    torch_val = torch.from_numpy(X_val).float()
+    y_val_tensor = torch.from_numpy(np.eye(output_dim)[y_val]).float()
 
-    metrics = adapter.evaluate_model(model, torch_val, y_val_tensor)
+    metrics = adapter.evaluate(model, torch_val, y_val_tensor)
     assert {"val_loss", "val_accuracy", "precision", "recall", "f1_score"}.issubset(metrics.keys())
     assert isinstance(adapter.fitness(metrics), float)
 

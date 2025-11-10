@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import re
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
 import json
 from omegaconf import OmegaConf
@@ -26,7 +28,7 @@ import torch
 
 from evomind.core.metrics import fairness_metrics
 
-from evomind.adapters import TASK_REGISTRY
+from evomind.adapters import get_adapter as _get_registered_adapter, list_adapters, register_adapter as _register_external_adapter
 from evomind.adapters.base_adapter import BaseTaskAdapter
 from evomind.adapters.data_utils import load_dataframe
 from evomind.core.data_profiler import (
@@ -55,8 +57,11 @@ from evomind.evolution import (
 from evomind.reporting.report_builder import build_report
 from evomind.utils import ConfigLoader, ExperimentLogger
 from evomind.utils.config_reference import (
+    CONFIG_SCHEMA,
     as_dict as _config_schema_dict,
+    to_console as _config_schema_console,
     to_markdown as _config_schema_markdown,
+    write_markdown as _config_write_markdown,
 )
 from evomind.utils.fingerprint import (
     compute_fingerprint,
@@ -64,6 +69,32 @@ from evomind.utils.fingerprint import (
     update_cache,
 )
 from evomind.utils.profiles import get_profile, list_profiles
+from evomind.exceptions import EvoMindConfigError
+
+
+def _slugify_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "dataset"
+
+
+def _derive_data_slug(data: Union[str, Path, pd.DataFrame, Sequence[Union[str, Path]]]) -> str:
+    if isinstance(data, pd.DataFrame):
+        return "dataframe"
+    if isinstance(data, (str, Path)):
+        return _slugify_name(Path(data).stem or "dataset")
+    if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+        items = list(data)
+        if not items:
+            return "dataset"
+        first = items[0]
+        if isinstance(first, (str, Path)):
+            base = Path(first).stem or "dataset"
+        else:
+            base = "dataset"
+        if len(items) > 1:
+            base = f"{base}-bundle"
+        return _slugify_name(base)
+    return "dataset"
 
 
 def _assess_stability(metrics: Dict[str, float]) -> str:
@@ -75,16 +106,6 @@ def _assess_stability(metrics: Dict[str, float]) -> str:
     if overfit < 0.05 and drift < 0.03 and cv_std < 0.03:
         return "Moderate drift"
     return "Potential overfitting"
-
-
-def _ensure_adapter(task_name: str) -> BaseTaskAdapter:
-    if task_name not in TASK_REGISTRY:
-        raise ValueError(f"Unknown task '{task_name}'. Available tasks: {list(TASK_REGISTRY.keys())}")
-    adapter_cls = TASK_REGISTRY[task_name]
-    try:
-        return adapter_cls()
-    except TypeError:
-        return adapter_cls(schema=None)  # type: ignore[call-arg]
 
 
 def _run_generic_fallback(
@@ -108,73 +129,73 @@ def _run_generic_fallback(
 
 
 def _prepare_dataset(
-    adapter: BaseTaskAdapter,
+    adapter: Optional[BaseTaskAdapter],
     data_path: Optional[Path],
     df: pd.DataFrame,
     schema: Dict[str, Any],
 ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], Dict[str, Dict], Dict[str, Any]]:
     task_type = getattr(adapter, "task_type", schema.get("task_type", "regression"))
-    skip_preprocess = False
-
-    if data_path:
-        try:
-            X_train, y_train, X_val, y_val = adapter.load_data(data_path)
-        except Exception as exc:  # noqa: BLE001 - adapters may raise anything
-            logging.warning("Adapter load_data failed: %s. Falling back to generic preprocessing.", exc)
-            skip_preprocess = True
-            X_train, X_val, y_train, y_val = _run_generic_fallback(df.copy(), schema, task_type)
-    else:
-        skip_preprocess = True
+    if adapter is None:
         X_train, X_val, y_train, y_val = _run_generic_fallback(df.copy(), schema, task_type)
-
-    feature_names: Iterable[str]
-    if not skip_preprocess:
-        try:
-            X_train_proc, X_val_proc = adapter.preprocess(X_train, X_val)
-            feature_names = getattr(adapter, "feature_names_", None) or [
-                f"feature_{i}" for i in range(X_train_proc.shape[1])
-            ]
-        except Exception as exc:  # noqa: BLE001
-            logging.warning("Adapter preprocess failed: %s. Using generic preprocessing.", exc)
-            skip_preprocess = True
-            X_train, X_val, y_train, y_val = _run_generic_fallback(df.copy(), schema, task_type)
-            X_train_proc = X_train.to_numpy(dtype=np.float32)
-            X_val_proc = X_val.to_numpy(dtype=np.float32)
-            feature_names = list(X_train.columns)
-    if skip_preprocess:
-        X_train_proc = X_train.to_numpy(dtype=np.float32)
-        X_val_proc = X_val.to_numpy(dtype=np.float32)
         feature_names = list(X_train.columns)
+        dataset_summary = {
+            "schema": schema,
+            "mode": "generic",
+        }
+        metadata = {
+            "feature_names": feature_names,
+            "raw_train_features": X_train,
+            "raw_train_target": y_train,
+        }
+        processed = (
+            X_train.to_numpy(dtype=np.float32),
+            y_train.to_numpy(dtype=np.float32).reshape(-1, 1),
+            X_val.to_numpy(dtype=np.float32),
+            y_val.to_numpy(dtype=np.float32).reshape(-1, 1),
+        )
+        return processed, dataset_summary, metadata
 
+    adapter.set_data_source(data_path or df.copy())
+    processed_frame = adapter.prepare_training_frame()
+    target_col = adapter.target_column or schema.get("target") or processed_frame.columns[-1]
+    features = processed_frame.drop(columns=[target_col], errors="ignore")
+    target = processed_frame[target_col]
+
+    stratify = target if task_type == "classification" and target.nunique() > 1 else None
+    from sklearn.model_selection import train_test_split
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        features, target, test_size=0.2, random_state=42, stratify=stratify
+    )
+
+    feature_names = features.columns.tolist()
     if task_type == "classification":
-        from sklearn.preprocessing import LabelEncoder
-
-        label_encoder = getattr(adapter, "label_encoder", None)
-        y_train_series = pd.Series(y_train).astype(str)
-        y_val_series = pd.Series(y_val).astype(str)
-        if label_encoder is None or not hasattr(label_encoder, "classes_"):
-            label_encoder = LabelEncoder()
-            label_encoder.fit(pd.concat([y_train_series, y_val_series], axis=0))
-            adapter.label_encoder = label_encoder
-        y_train_encoded = label_encoder.transform(y_train_series)
-        y_val_encoded = label_encoder.transform(y_val_series)
-        y_train_arr = np.eye(len(label_encoder.classes_), dtype=np.float32)[y_train_encoded]
-        y_val_arr = np.eye(len(label_encoder.classes_), dtype=np.float32)[y_val_encoded]
+        classes = int(pd.Series(target).max()) + 1
+        y_train_idx = pd.Series(y_train).astype(int).to_numpy()
+        y_val_idx = pd.Series(y_val).astype(int).to_numpy()
+        y_train_arr = np.eye(classes, dtype=np.float32)[y_train_idx]
+        y_val_arr = np.eye(classes, dtype=np.float32)[y_val_idx]
     else:
         y_train_arr = np.asarray(y_train, dtype=np.float32).reshape(-1, 1)
         y_val_arr = np.asarray(y_val, dtype=np.float32).reshape(-1, 1)
 
     try:
-        dataset_summary = adapter.summarize_data(X_train, y_train)
+        dataset_summary = adapter.summarize_data(processed_frame)
     except Exception as exc:  # noqa: BLE001
         dataset_summary = {"schema": schema, "warning": str(exc)}
 
     metadata = {
-        "feature_names": list(feature_names),
+        "feature_names": feature_names,
         "raw_train_features": X_train,
         "raw_train_target": y_train,
+        "target_column": target_col,
     }
-    processed = (X_train_proc.astype(np.float32), y_train_arr, X_val_proc.astype(np.float32), y_val_arr)
+    processed = (
+        X_train.to_numpy(dtype=np.float32),
+        y_train_arr.astype(np.float32),
+        X_val.to_numpy(dtype=np.float32),
+        y_val_arr.astype(np.float32),
+    )
     return processed, dataset_summary, metadata
 
 
@@ -255,11 +276,42 @@ class EvoMind:
     """
 
     @classmethod
+    def register_adapter(cls, name: str, adapter_cls: Type[BaseTaskAdapter]) -> None:
+        """Expose registry helper for third-party integrations."""
+
+        _register_external_adapter(name)(adapter_cls)
+
+    @classmethod
+    def available_adapters(cls) -> Dict[str, Type[BaseTaskAdapter]]:
+        """Return the currently registered adapters."""
+
+        return list_adapters()
+
+    @classmethod
+    def get_adapter(cls, name: str) -> Type[BaseTaskAdapter]:
+        """Retrieve a registered adapter class by name."""
+
+        return _get_registered_adapter(name)
+
+    def _allocate_run_id(self, slug: str) -> str:
+        experiments_dir = Path("experiments")
+        experiments_dir.mkdir(parents=True, exist_ok=True)
+        pattern = re.compile(rf"{re.escape(slug)}_(\d+)$")
+        max_index = 0
+        for entry in experiments_dir.iterdir():
+            if entry.is_dir():
+                match = pattern.match(entry.name)
+                if match:
+                    max_index = max(max_index, int(match.group(1)))
+        return f"{slug}_{max_index + 1:03d}"
+
+    @classmethod
     def describe_config(
         cls,
         section: Optional[str] = None,
         *,
         as_markdown: bool = False,
+        to_console: bool = False,
     ) -> Union[str, Dict[str, Dict[str, Dict[str, object]]]]:
         """Return metadata describing EvoMind configuration keys.
 
@@ -271,6 +323,9 @@ class EvoMind:
         as_markdown : bool, default False
             When True, the result is formatted as Markdown text suitable for
             documentation. Otherwise a nested dictionary is returned.
+        to_console : bool, default False
+            When True, pretty-print the configuration table to stdout. The
+            return value is still provided for programmatic use.
 
         Returns
         -------
@@ -280,8 +335,40 @@ class EvoMind:
         """
 
         if as_markdown:
-            return _config_schema_markdown(section=section)
+            markdown = _config_schema_markdown(section=section)
+            if to_console:
+                print(markdown)
+            return markdown
+
+        if to_console:
+            print(_config_schema_console(section=section))
         return _config_schema_dict(section)
+
+    @classmethod
+    def explain(cls, key: str) -> str:
+        """Return a human readable description for a configuration key."""
+
+        normalized = key.strip().lower().replace("-", "_")
+        for section_name, fields in CONFIG_SCHEMA.items():
+            for field in fields.values():
+                if field.name.lower() == normalized:
+                    default_repr = "None" if field.default is None else repr(field.default)
+                    description = field.description or "No description available."
+                    return (
+                        f"{field.name} (section={section_name}, type={field.type}, "
+                        f"default={default_repr}) -> {description}"
+                    )
+        raise EvoMindConfigError(
+            f"Unknown configuration key '{key}'.",
+            context={"key": key},
+        )
+
+    @classmethod
+    def generate_config_docs(cls, path: Union[str, Path] = Path("CONFIG.md")) -> Path:
+        """Render the configuration reference to a markdown file."""
+
+        target = Path(path)
+        return _config_write_markdown(target)
 
     @classmethod
     def available_profiles(cls) -> Dict[str, Dict[str, object]]:
@@ -291,19 +378,22 @@ class EvoMind:
 
     def __init__(
         self,
-        data: Union[str, Path, pd.DataFrame],
+        data: Union[str, Path, pd.DataFrame, Sequence[Union[str, Path]]],
         task: str = "auto",
         profile: Optional[str] = None,
         insights: bool = True,
         config: Optional[Union[str, Path, Dict[str, Any]]] = None,
         global_config: Optional[Union[str, Path, Dict[str, Any]]] = "configs/global.yaml",
+        run_name: Optional[str] = None,
     ) -> None:
         """Create a new EvoMind orchestrator.
 
         Parameters
         ----------
-        data : str | Path | pandas.DataFrame
-            Dataset source. Accepts a path to CSV/JSON files or an in-memory dataframe.
+        data : str | Path | pandas.DataFrame | Sequence[str | Path]
+            Dataset source. Accepts a path to CSV/JSON files, a list of paths (they
+            will be concatenated), directories containing multiple CSV/JSON files,
+            or an in-memory dataframe.
         task : str, default "auto"
             Registered task adapter to use. When ``"auto"`` EvoMind detects the best
             adapter based on schema profiling.
@@ -314,14 +404,20 @@ class EvoMind:
             Enable explainability and profiling artefacts.
         config : str | Path | dict, optional
             Task-specific configuration overrides supplied as a YAML/JSON file or a mapping.
-        global_config : str | Path | dict, optional
+            global_config : str | Path | dict, optional
             Base configuration merged before ``config``. Defaults to ``configs/global.yaml``.
+        run_name : str, optional
+            Optional slug used to name the run directories (e.g. ``holiday_campaign``).
+            When omitted, EvoMind derives the name from the dataset path.
         """
 
         self.data_source = data
         self.task = task
         self.profile = profile
         self.insights_enabled = insights
+        self.data_slug = _derive_data_slug(data)
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._data_source_paths: List[Path] = []
         if isinstance(global_config, (str, Path)):
             gc_path = Path(global_config)
             global_loader = ConfigLoader(gc_path) if gc_path.exists() else ConfigLoader()
@@ -366,17 +462,56 @@ class EvoMind:
             tracking_uri=tracking_uri,
             enabled=logging_enabled,
         )
-        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_dir = Path("experiments") / f"run_{self.run_id}"
+        base_slug = _slugify_name(run_name) if run_name else self.data_slug
+        self.run_id = self._allocate_run_id(base_slug)
+        self.output_dir = Path("experiments") / self.run_id
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_dataframe(self) -> Tuple[pd.DataFrame, Optional[Path]]:
         if isinstance(self.data_source, pd.DataFrame):
+            self._data_source_paths = []
             return self.data_source.copy(), None
-        data_path = Path(self.data_source)
-        if not data_path.exists():
-            raise FileNotFoundError(f"Dataset not found: {data_path}")
-        return load_dataframe(data_path), data_path
+        if isinstance(self.data_source, (str, Path)):
+            data_path = Path(self.data_source)
+            if not data_path.exists():
+                raise FileNotFoundError(f"Dataset not found: {data_path}")
+            self._data_source_paths = [data_path]
+            return load_dataframe(data_path), data_path
+        if isinstance(self.data_source, Sequence):
+            sequence_items = list(self.data_source)
+            if len(sequence_items) == 1 and isinstance(sequence_items[0], (str, Path, pd.DataFrame)):
+                single_source = sequence_items[0]
+                self.data_source = single_source  # type: ignore[assignment]
+                return self._load_dataframe()
+            frames: List[pd.DataFrame] = []
+            origin_paths: List[Path] = []
+            for entry in sequence_items:
+                if isinstance(entry, pd.DataFrame):
+                    origin_paths.append(Path("in-memory"))
+                    frames.append(entry.copy())
+                    continue
+                if isinstance(entry, (str, Path)):
+                    path = Path(entry)
+                else:
+                    continue
+                if not path.exists():
+                    raise FileNotFoundError(f"Dataset not found: {path}")
+                if path.is_dir():
+                    files = sorted(list(path.glob("*.csv")) + list(path.glob("*.json")))
+                    if not files:
+                        raise FileNotFoundError(f"No CSV/JSON files found in directory: {path}")
+                    for file in files:
+                        frames.append(load_dataframe(file))
+                        origin_paths.append(file)
+                else:
+                    frames.append(load_dataframe(path))
+                    origin_paths.append(path)
+            if not frames:
+                raise ValueError("No datasets were loaded from the provided sources.")
+            combined = pd.concat(frames, ignore_index=True)
+            self._data_source_paths = origin_paths
+            return combined, None
+        raise TypeError("Unsupported data source type. Provide a path, DataFrame, or list of sources.")
 
     def _detect_task(self, df: pd.DataFrame, schema: Dict[str, Any]) -> str:
         if self.task and self.task != "auto":
@@ -384,10 +519,35 @@ class EvoMind:
         detected = detect_task_type(df, schema)
         return detected or "regression"
 
-    def _build_adapter(self, task_name: str, schema: Dict[str, Any]) -> BaseTaskAdapter:
-        adapter = _ensure_adapter(task_name)
+    def _build_adapter(
+        self,
+        task_name: str,
+        schema: Dict[str, Any],
+        data_source: Optional[Union[Path, pd.DataFrame]],
+    ) -> Optional[BaseTaskAdapter]:
+        resolved_name = task_name
+        try:
+            adapter_cls = _get_registered_adapter(task_name)
+        except KeyError:
+            message = "⚙️ No domain adapter detected. Running in Generic Mode."
+            logging.info(message)
+            print(message)
+            logging.debug("Available adapters: %s", ", ".join(sorted(list_adapters().keys())))
+            fallback = schema.get("task_type") or "regression"
+            resolved_name = fallback
+            try:
+                adapter_cls = _get_registered_adapter(fallback)
+            except KeyError:
+                adapter_cls = _get_registered_adapter("regression")
+        adapter = adapter_cls(
+            schema=schema,
+            data=data_source,
+            config=self.config.get("adapters", {}).get(resolved_name, {}),
+        )
         if hasattr(adapter, "schema"):
             adapter.schema = schema
+        if hasattr(adapter, "set_data_source"):
+            adapter.set_data_source(data_source)
         return adapter
 
     def _create_population(self, population_size: int) -> PopulationManager:
@@ -558,7 +718,10 @@ class EvoMind:
             "fairness": artifacts.get("fairness"),
             "fairness_json": str(fairness_path) if fairness_path else None,
             "diagnosis_log": str(artifacts.get("diagnosis_log")) if artifacts.get("diagnosis_log") else None,
-            "recorded_at": self.run_id,
+            "recorded_at": self.run_timestamp,
+            "executor": artifacts.get("executor_stats"),
+            "config": artifacts.get("resolved_config"),
+            "data_sources": artifacts.get("data_sources"),
         }
         manifest["profile"] = self.profile
         manifest["fingerprint"] = artifacts.get("fingerprint")
@@ -744,8 +907,13 @@ class EvoMind:
         if fingerprint:
             update_cache(fingerprint, copy.deepcopy(schema), schema.get("task_type"))
 
-        adapter = self._build_adapter(self._detect_task(df, schema), schema)
+        adapter = self._build_adapter(
+            self._detect_task(df, schema),
+            schema,
+            data_path if data_path is not None else df.copy(),
+        )
         dataset, dataset_summary, metadata = _prepare_dataset(adapter, data_path, df, schema)
+        metadata["source_files"] = [str(path) for path in self._data_source_paths]
 
         engine_cfg = dict(self.config.get("engine", {}))
         if not engine_cfg:
@@ -788,14 +956,17 @@ class EvoMind:
 
         lineage: List[Dict[str, Any]] = []
         history_records: List[Dict[str, Any]] = []
+        executor_history: List[Dict[str, Any]] = []
         best_genome = None
         metrics: Dict[str, float] = {}
 
         with self.logger.start_run(run_name=self.run_id):
             for generation in range(generations):
-                summary, best, generation_lineage = engine.run_generation(adapter, dataset, generation)
+                summary, best, generation_lineage, exec_stats = engine.run_generation(adapter, dataset, generation)
                 lineage.extend(generation_lineage)
                 history_records.append({"generation": generation, **summary})
+                if exec_stats:
+                    executor_history.append(exec_stats)
                 best_genome = best
                 metrics = best.metrics
                 engine.evolve()
@@ -823,6 +994,13 @@ class EvoMind:
             sensitive_feature=self.config.get("data", {}).get("sensitive_feature"),
             fingerprint=fingerprint,
         )
+        artifacts["executor_stats"] = {
+            "backend": getattr(engine.executor, "backend", "threads"),
+            "max_workers": engine.executor.max_workers,
+            "history": executor_history,
+        }
+        artifacts["data_sources"] = [str(path) for path in self._data_source_paths]
+        artifacts["resolved_config"] = json.loads(json.dumps(self.config, default=str))
 
         artifact_paths = self._persist_run_outputs(history_records, artifacts, metrics)
         artifacts["paths"] = {key: str(path) for key, path in artifact_paths.items()}

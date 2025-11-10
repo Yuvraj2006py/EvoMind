@@ -16,12 +16,12 @@ The Streamlit dashboard provides an interactive exploration surface for EvoMind 
 streamlit run evomind/dashboard/app.py
 ```
 
-Pass a specific run directory to inspect historical executions:
+Pass a specific run directory (or your custom run name) to inspect historical executions:
 
 ```bash
-streamlit run evomind/dashboard/app.py -- --run_id run_20251102_083000
+streamlit run evomind/dashboard/app.py -- --run_id shopping_behavior_003
 ```
 
 ## Customisation
 
-Use the configuration system to adjust visual defaults (theme, plot density) or override feature lists. The dashboard consumes the experiment artefacts saved under `experiments/<run_id>/`.
+Use the configuration system to adjust visual defaults (theme, plot density) or override feature lists. The dashboard consumes the experiment artefacts saved under `experiments/<run_id>/` (e.g., `experiments/shopping_behavior_003/` or `experiments/holiday_campaign_002/` when you reuse `--run-name holiday_campaign`).

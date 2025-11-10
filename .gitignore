@@ -24,6 +24,11 @@ experiments/
 logs/
 models/
 
+# Local datasets (keep bundled json example)
+data/**/*.csv
+data/**/*.xlsx
+!data/grocery_chain_data.json
+
 # IDE / OS noise
 .DS_Store
 Thumbs.db

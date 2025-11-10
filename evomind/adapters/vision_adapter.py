@@ -5,7 +5,7 @@ Computer vision adapter for EvoMind built on flattened image features.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,8 +19,15 @@ from evomind.adapters.classification_adapter import ClassificationAdapter
 class VisionAdapter(ClassificationAdapter):
     """Handle image classification datasets stored as folders of images."""
 
-    def __init__(self, image_size: int = 32, schema: Optional[Dict[str, object]] = None) -> None:
-        super().__init__(schema=schema, default_target="label")
+    def __init__(
+        self,
+        image_size: int = 32,
+        schema: Optional[Dict[str, object]] = None,
+        *,
+        data: Any | None = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(schema=schema, default_target="label", data=data, config=config)
         self.image_size = image_size
 
     def _load_dataframe(self, path: Path) -> pd.DataFrame:  # type: ignore[override]
